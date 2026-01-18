@@ -1,0 +1,104 @@
+{
+    "alerts": {
+        "Pocket Location": {
+            "enabled": true,
+            "threshold": 20
+        },
+        "Package Location": {
+            "enabled": true,
+            "threshold": 20
+        },
+        "Alignment": {
+            "enabled": true,
+            "threshold": 20
+        },
+        "Body Length": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Body Width": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Terminal Length": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Terminal Width": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Term To Term": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Body Smear": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Body Stain": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Edge Chipoff": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Terminal Pogo": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Terminal Incomplete": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Oxidation": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Terminal Chipoff": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Terminal Color": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Body Color": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Mark": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Mark Color": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Re-Inspect": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Others": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Body Scratch": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Peel Termination": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Body Crack": {
+            "enabled": false,
+            "threshold": 20
+        },
+        "Fail Yield": {
+            "enabled": false,
+            "threshold": 20
+        }
+    }
+}

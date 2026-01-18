@@ -1,0 +1,10 @@
+{
+    "package_location": true,
+    "top_station": true,
+    "bottom_station": true,
+    "debug_draw": false,
+    "debug_step_mode": false,
+    "debug_print": false,
+    "debug_edge": false,
+    "save_failed_images": false
+}

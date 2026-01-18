@@ -1,0 +1,14 @@
+{
+    "machine_id": "iTrue #1",
+    "operator_id": "255",
+    "order_no": "11111111",
+    "scan_no": "255",
+    "lot_id": "255",
+    "lot_size": "255",
+    "package_type": "Default",
+    "save_images": {
+        "pass": true,
+        "fail": true,
+        "all": false
+    }
+}
