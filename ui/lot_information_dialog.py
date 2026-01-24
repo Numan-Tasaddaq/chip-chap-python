@@ -13,34 +13,103 @@ class LotInformationDialog(QDialog):
         super().__init__(parent)
 
         self.setWindowTitle("Lot Information")
-        self.setFixedSize(380, 360)
+        self.setFixedSize(420, 430)
         self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
 
-        # Load existing model or create new
         self.lot_info = lot_info or load_lot_info()
-
-        # Store checkbox references
         self._save_checkboxes: dict[str, QCheckBox] = {}
 
         self._build_ui()
-        self._load_from_model()  # populate UI with saved values
+        self._load_from_model()
 
-    # ------------------------------
-    # Build the UI
     # ------------------------------
     def _build_ui(self):
-        main = QVBoxLayout(self)
+        self.setStyleSheet("""
+            QDialog {
+                background: #f7f7f7;
+                font-size: 13px;
+            }
 
-        # ================= Form =================
-        form = QGridLayout()
-        form.setHorizontalSpacing(12)
+            QLabel {
+                color: #2b2b2b;
+            }
+
+            QLineEdit, QComboBox {
+                height: 28px;
+                padding: 4px 6px;
+                border: 1px solid #bdbdbd;
+                border-radius: 4px;
+                background: white;
+            }
+
+            QLineEdit[readOnly="true"] {
+                background: #ececec;
+                color: #555;
+            }
+
+            QGroupBox {
+                border: 1px solid #cfcfcf;
+                border-radius: 6px;
+                margin-top: 16px;
+                padding-top: 10px;
+                font-weight: 600;
+                color: #333;
+            }
+
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                top: 0px;
+                padding: 0 6px;
+                background: #f7f7f7;
+            }
+
+
+            QCheckBox {
+                spacing: 6px;
+            }
+
+            QPushButton {
+                min-width: 90px;
+                height: 30px;
+                border-radius: 4px;
+                font-weight: 600;
+            }
+
+            QPushButton#okBtn {
+                background-color: #0078d7;
+                color: white;
+                border: none;
+            }
+
+            QPushButton#okBtn:hover {
+                background-color: #006ac1;
+            }
+
+            QPushButton#cancelBtn {
+                background-color: #e6e6e6;
+                border: 1px solid #bdbdbd;
+            }
+        """)
+
+        main = QVBoxLayout(self)
+        main.setContentsMargins(16, 16, 16, 16)
+        main.setSpacing(14)
+
+        # ========= Lot Details =========
+        grp_form = QGroupBox("LOT DETAILS")
+        form = QGridLayout(grp_form)
+        form.setHorizontalSpacing(14)
         form.setVerticalSpacing(10)
 
         self.machine_id = QLineEdit()
         self.machine_id.setReadOnly(True)
+
         self.operator_id = QLineEdit()
         self.order_no = QLineEdit()
         self.order_no.setReadOnly(True)
+
         self.scan_no = QLineEdit()
         self.lot_id = QLineEdit()
         self.lot_size = QLineEdit()
@@ -49,40 +118,47 @@ class LotInformationDialog(QDialog):
         self.package_type.addItem("Default")
 
         fields = [
-            ("Machine ID :", self.machine_id),
-            ("Operator ID :", self.operator_id),
-            ("Order No :", self.order_no),
-            ("Scan No :", self.scan_no),
-            ("Lot ID :", self.lot_id),
-            ("Lot Size :", self.lot_size),
-            ("Package Type :", self.package_type),
+            ("Machine ID", self.machine_id),
+            ("Operator ID", self.operator_id),
+            ("Order No", self.order_no),
+            ("Scan No", self.scan_no),
+            ("Lot ID", self.lot_id),
+            ("Lot Size", self.lot_size),
+            ("Package Type", self.package_type),
         ]
 
         for row, (label, widget) in enumerate(fields):
-            form.addWidget(QLabel(label), row, 0)
+            lbl = QLabel(label)
+            lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            form.addWidget(lbl, row, 0)
             form.addWidget(widget, row, 1)
 
-        main.addLayout(form)
+        main.addWidget(grp_form)
 
-        # ================= Save Images =================
-        grp_save = QGroupBox("Save Images")
-        grp_save.setObjectName("Save Images")  # needed for findChild
-        h = QHBoxLayout(grp_save)
+        # ========= Save Images =========
+        grp_save = QGroupBox("SAVE IMAGES")
+        save_layout = QHBoxLayout(grp_save)
+        save_layout.setContentsMargins(12, 12, 12, 12)
+        save_layout.setSpacing(20)
 
-        for key in ["pass", "fail", "all"]:
-            cb = QCheckBox(key.capitalize())
+
+        for key, text in [("pass", "Pass"), ("fail", "Fail"), ("all", "All")]:
+            cb = QCheckBox(text)
             self._save_checkboxes[key] = cb
-            h.addWidget(cb)
-        h.addStretch()
+            save_layout.addWidget(cb)
 
+        save_layout.addStretch()
         main.addWidget(grp_save)
 
-        # ================= Buttons =================
+        # ========= Buttons =========
         btns = QHBoxLayout()
         btns.addStretch()
 
         btn_ok = QPushButton("OK")
+        btn_ok.setObjectName("okBtn")
+
         btn_cancel = QPushButton("Cancel")
+        btn_cancel.setObjectName("cancelBtn")
 
         btn_ok.clicked.connect(self._on_ok)
         btn_cancel.clicked.connect(self.reject)
@@ -91,8 +167,6 @@ class LotInformationDialog(QDialog):
         btns.addWidget(btn_cancel)
         main.addLayout(btns)
 
-    # ------------------------------
-    # Load values from model to UI
     # ------------------------------
     def _load_from_model(self):
         self.machine_id.setText(self.lot_info.machine_id)
@@ -103,12 +177,9 @@ class LotInformationDialog(QDialog):
         self.lot_size.setText(self.lot_info.lot_size)
         self.package_type.setCurrentText(self.lot_info.package_type)
 
-        # Save images checkboxes
         for key, cb in self._save_checkboxes.items():
             cb.setChecked(self.lot_info.save_images.get(key, False))
 
-    # ------------------------------
-    # Apply UI values to model
     # ------------------------------
     def _apply_to_model(self):
         self.lot_info.machine_id = self.machine_id.text()
@@ -122,11 +193,8 @@ class LotInformationDialog(QDialog):
         for key, cb in self._save_checkboxes.items():
             self.lot_info.save_images[key] = cb.isChecked()
 
-        # Save to JSON
         save_lot_info(self.lot_info)
 
-    # ------------------------------
-    # OK button handler
     # ------------------------------
     def _on_ok(self):
         self._apply_to_model()

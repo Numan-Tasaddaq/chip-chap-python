@@ -1,5 +1,5 @@
 {
-    "machine_id": "iTrue #1",
+    "machine_id": "",
     "operator_id": "255",
     "order_no": "11111111",
     "scan_no": "255",
@@ -8,7 +8,7 @@
     "package_type": "Default",
     "save_images": {
         "pass": true,
-        "fail": true,
+        "fail": false,
         "all": false
     }
 }

@@ -1,5 +1,5 @@
 {
-    "edge_contrast_value": "255",
+    "edge_contrast_value": "106",
     "post_seal_low_contrast": "255",
     "body_area_tolerance": "255",
     "body_area_left_offset": "255",
@@ -102,5 +102,5 @@
     "sealing_shift_hole_ref": true,
     "sealing_shift_white_to_black_scar": true,
     "bottom_dent_enable": true,
-    "edge_contrast_slider": 255
+    "edge_contrast_slider": 106
 }

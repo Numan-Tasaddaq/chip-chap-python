@@ -10,7 +10,7 @@
     "flip_bot": true,
     "pkg_loc_recheck": true,
     "edge_scan_angle": 255,
-    "reverse_edge_angle": 255,
+    "reverse_edge_angle": 0,
     "four_color_threshold": 255,
     "flip_white_tol": 255,
     "flip_bot_tol": 255,
@@ -48,5 +48,5 @@
     "filter_green_value": 255,
     "line_mask_count": 255,
     "contrast_plus": 255,
-    "contrast": 101
+    "contrast": 159
 }

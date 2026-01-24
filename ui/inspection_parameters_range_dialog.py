@@ -2,10 +2,13 @@
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QGroupBox, QLabel, QGridLayout, QLineEdit,
-    QPushButton, QCheckBox
+    QPushButton, QCheckBox, QFrame, QSpacerItem, QSizePolicy
 )
 from PySide6.QtCore import Qt
-from config.inspection_parameters_io import save_parameters
+from config.inspection_parameters_io import save_parameters, load_parameters
+from config.teach_store import save_teach_data
+from PySide6.QtWidgets import QScrollArea
+from PySide6.QtGui import QFont
 
 class InspectionParametersRangeDialog(QDialog):
     """
@@ -19,277 +22,414 @@ class InspectionParametersRangeDialog(QDialog):
         super().__init__(parent)
 
         self.setWindowTitle("Inspection Parameters Range - Track1")
-        self.resize(950, 700)
+        self.resize(1100, 520)
+        self.setMinimumHeight(520)
+        self.setMaximumHeight(520)
+
         self.setWindowFlags(
-        self.windowFlags()
-        | Qt.Window
-        | Qt.WindowMinMaxButtonsHint
-    )
+            Qt.Window
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
+
         self._numeric_fields: dict[str, QLineEdit] = {}
         self._inspection_checkboxes: dict[str, QCheckBox] = {}
 
+        # Set professional color palette
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f5f5f5;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+                margin-top: 10px;
+                padding-top: 10px;
+                background-color: white;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #2c3e50;
+            }
+            QLabel {
+                color: #333333;
+            }
+            QLineEdit {
+                border: 1px solid #cccccc;
+                border-radius: 3px;
+                padding: 4px;
+                background-color: white;
+                min-height: 22px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3498db;
+                background-color: #f8f9fa;
+            }
+            QTabWidget::pane {
+                border: 1px solid #cccccc;
+                background-color: white;
+                border-radius: 4px;
+            }
+            QTabBar::tab {
+                background-color: #ecf0f1;
+                border: 1px solid #cccccc;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                color: #7f8c8d;
+            }
+            QTabBar::tab:selected {
+                background-color: white;
+                border-bottom: 2px solid #3498db;
+                color: #2c3e50;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #f8f9fa;
+            }
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 20px;
+                font-weight: bold;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+            QPushButton:pressed {
+                background-color: #1c5a7d;
+            }
+            QPushButton#cancelButton {
+                background-color: #95a5a6;
+            }
+            QPushButton#cancelButton:hover {
+                background-color: #7f8c8d;
+            }
+            QCheckBox {
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+            }
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+        """)
 
         self._build_ui()
 
     # -------------------------------------------------
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Create a frame for the content to add subtle shadow effect
+        content_frame = QFrame()
+        content_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 6px;
+                border: 1px solid #e0e0e0;
+            }
+        """)
+        content_layout = QVBoxLayout(content_frame)
+        content_layout.setContentsMargins(0, 0, 0, 0)
 
         self.tabs = QTabWidget()
-        main_layout.addWidget(self.tabs)
+        self.tabs.setDocumentMode(True)
+        content_layout.addWidget(self.tabs)
 
         # Tabs (order matches real software)
         self.tab_param = self._parameter_measurement_tab()
-        self.tabs.addTab(self.tab_param, "Parameter & Measurement")
-        self.tabs.addTab(self._pkg_loc_cam_tab(), "Pkg Loc & Cam Setup")
-        self.tabs.addTab(self._tqs_tab(), "TQS Range")
-        self.tabs.addTab(self._body_inspection_range_tab(), "Body Inspection Range")
-        self.tabs.addTab(self._terminal_inspection_range_tab(), "Terminal Inspection Range")
-        self.tabs.addTab(self._inspection_item_selection_tab(), "Inspection Item Selection")
-        
+        self.tabs.addTab(self._make_scrollable(self.tab_param), "Parameter & Measurement")
+        self.tabs.addTab(self._make_scrollable(self._pkg_loc_cam_tab()), "Pkg Loc & Cam Setup")
+        self.tabs.addTab(self._make_scrollable(self._tqs_tab()), "TQS Range")
+        self.tabs.addTab(self._make_scrollable(self._body_inspection_range_tab()), "Body Inspection Range")
+        self.tabs.addTab(self._make_scrollable(self._terminal_inspection_range_tab()), "Terminal Inspection Range")
+        self.tabs.addTab(self._make_scrollable(self._inspection_item_selection_tab()), "Inspection Item Selection")
 
         # Default tab
         self.tabs.setCurrentWidget(self.tab_param)
         # LOAD STORED VALUES INTO UI
         self._load_from_model()
 
-        # Buttons
+        # Add frame to main layout
+        main_layout.addWidget(content_frame)
+
+        # Separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        separator.setStyleSheet("background-color: #e0e0e0; margin: 5px 0;")
+        main_layout.addWidget(separator)
+
+        # Buttons with improved layout
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
         btn_ok = QPushButton("OK")
         btn_cancel = QPushButton("Cancel")
+        btn_cancel.setObjectName("cancelButton")
         btn_apply = QPushButton("Apply")
+
+        # Set fixed button sizes for consistency
+        btn_ok.setFixedSize(90, 32)
+        btn_cancel.setFixedSize(90, 32)
+        btn_apply.setFixedSize(90, 32)
 
         btn_ok.clicked.connect(self._on_ok)
         btn_apply.clicked.connect(self._on_apply)
         btn_cancel.clicked.connect(self.reject)
 
-        btn_row.addWidget(btn_ok)
-        btn_row.addWidget(btn_cancel)
+        # Add spacing between buttons
         btn_row.addWidget(btn_apply)
+        btn_row.addSpacing(10)
+        btn_row.addWidget(btn_ok)
+        btn_row.addSpacing(10)
+        btn_row.addWidget(btn_cancel)
 
         main_layout.addLayout(btn_row)
-        
 
     # =================================================
     # TAB: Parameter & Measurement
     # =================================================
     def _parameter_measurement_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setStyleSheet("background-color: white;")
         layout = QVBoxLayout(tab)
-        layout.setSpacing(12)
+        layout.setSpacing(16)
+        layout.setContentsMargins(15, 15, 15, 15)
 
         # ---------------- Unit Parameter ----------------
         grp_unit = QGroupBox("Unit Parameter")
+        grp_unit.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
         g = QGridLayout(grp_unit)
-        g.setHorizontalSpacing(16)
-        g.setVerticalSpacing(8)
+        g.setHorizontalSpacing(20)
+        g.setVerticalSpacing(10)
+        g.setContentsMargins(12, 20, 12, 12)
 
-        g.addWidget(QLabel(""), 0, 0)
-        g.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-        g.addWidget(QLabel(""), 0, 3)
-        g.addWidget(QLabel("Min"), 0, 4, Qt.AlignCenter)
-        g.addWidget(QLabel("Max"), 0, 5, Qt.AlignCenter)
+        # Header row with improved styling
+        header_font = QFont()
+        header_font.setBold(True)
+        
+        for col, text in enumerate(["", "Min", "Max", "", "Min", "Max"]):
+            label = QLabel(text)
+            if text in ["Min", "Max"]:
+                label.setFont(header_font)
+                label.setAlignment(Qt.AlignCenter)
+                label.setStyleSheet("color: #2c3e50; background-color: #f8f9fa; padding: 4px; border-radius: 3px;")
+            g.addWidget(label, 0, col)
 
-        g.addWidget(QLabel("Body Length:"), 1, 0)
-        self.body_length_min = QLineEdit("120")
-        self.body_length_max = QLineEdit("200")
+        # Body Length
+        self.body_length_min = self._create_line_edit("120")
+        self.body_length_max = self._create_line_edit("200")
         self._numeric_fields["body_length_min"] = self.body_length_min
         self._numeric_fields["body_length_max"] = self.body_length_max
 
+        g.addWidget(self._create_label("Body Length:"), 1, 0)
         g.addWidget(self.body_length_min, 1, 1)
         g.addWidget(self.body_length_max, 1, 2)
 
-        g.addWidget(QLabel("Body Width:"), 2, 0)
-        self.body_width_min = QLineEdit("50")
-        self.body_width_max = QLineEdit("100")
+        # Body Width
+        self.body_width_min = self._create_line_edit("50")
+        self.body_width_max = self._create_line_edit("100")
         self._numeric_fields["body_width_min"] = self.body_width_min
         self._numeric_fields["body_width_max"] = self.body_width_max
 
+        g.addWidget(self._create_label("Body Width:"), 2, 0)
         g.addWidget(self.body_width_min, 2, 1)
         g.addWidget(self.body_width_max, 2, 2)
 
-        pkg_loc_min = QLineEdit("40")
-        pkg_loc_max = QLineEdit("120")
-
-        g.addWidget(QLabel("Pkg Loc:"), 3, 0)
+        # Pkg Loc
+        pkg_loc_min = self._create_line_edit("40")
+        pkg_loc_max = self._create_line_edit("120")
+        g.addWidget(self._create_label("Pkg Loc:"), 3, 0)
         g.addWidget(pkg_loc_min, 3, 1)
         g.addWidget(pkg_loc_max, 3, 2)
-
         self._numeric_fields["pkg_loc_min"] = pkg_loc_min
         self._numeric_fields["pkg_loc_max"] = pkg_loc_max
 
-
-        terminal_length_min = QLineEdit("20")
-        terminal_length_max = QLineEdit("70")
-
-        g.addWidget(QLabel("Terminal Length:"), 1, 3)
+        # Terminal Length
+        terminal_length_min = self._create_line_edit("20")
+        terminal_length_max = self._create_line_edit("70")
+        g.addWidget(self._create_label("Terminal Length:"), 1, 3)
         g.addWidget(terminal_length_min, 1, 4)
         g.addWidget(terminal_length_max, 1, 5)
-
         self._numeric_fields["terminal_length_min"] = terminal_length_min
         self._numeric_fields["terminal_length_max"] = terminal_length_max
 
-        g.addWidget(QLabel("Terminal Width:"), 2, 3)
-        self.terminal_width_min = QLineEdit("50")
-        self.terminal_width_max = QLineEdit("100")
+        # Terminal Width
+        self.terminal_width_min = self._create_line_edit("50")
+        self.terminal_width_max = self._create_line_edit("100")
         self._numeric_fields["terminal_width_min"] = self.terminal_width_min
         self._numeric_fields["terminal_width_max"] = self.terminal_width_max
-
+        g.addWidget(self._create_label("Terminal Width:"), 2, 3)
         g.addWidget(self.terminal_width_min, 2, 4)
         g.addWidget(self.terminal_width_max, 2, 5)
 
-        term_term_length_min = QLineEdit("20")
-        term_term_length_max = QLineEdit("180")
-
-        g.addWidget(QLabel("Term-Term Length:"), 3, 3)
+        # Term-Term Length
+        term_term_length_min = self._create_line_edit("20")
+        term_term_length_max = self._create_line_edit("180")
+        g.addWidget(self._create_label("Term-Term Length:"), 3, 3)
         g.addWidget(term_term_length_min, 3, 4)
         g.addWidget(term_term_length_max, 3, 5)
-
         self._numeric_fields["term_term_length_min"] = term_term_length_min
         self._numeric_fields["term_term_length_max"] = term_term_length_max
 
-        tt_diff_min = QLineEdit("1")
-        tt_diff_max = QLineEdit("20")
-
-        g.addWidget(QLabel("Term-Term Length Max-Min:"), 4, 3)
+        # Term-Term Length Max-Min
+        tt_diff_min = self._create_line_edit("1")
+        tt_diff_max = self._create_line_edit("20")
+        g.addWidget(self._create_label("Term-Term Length Max-Min:"), 4, 3)
         g.addWidget(tt_diff_min, 4, 4)
         g.addWidget(tt_diff_max, 4, 5)
-
         self._numeric_fields["term_term_length_diff_min"] = tt_diff_min
         self._numeric_fields["term_term_length_diff_max"] = tt_diff_max
 
-
         g.setColumnStretch(0, 2)
         g.setColumnStretch(3, 2)
-
         layout.addWidget(grp_unit)
 
         # ---------------- Dimension Measurement ----------------
         grp_dim = QGroupBox("Dimension Measurement")
+        grp_dim.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
         g2 = QGridLayout(grp_dim)
+        g2.setHorizontalSpacing(20)
+        g2.setVerticalSpacing(10)
+        g2.setContentsMargins(12, 20, 12, 12)
 
-        g2.addWidget(QLabel(""), 0, 0)
-        g2.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g2.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-        g2.addWidget(QLabel(""), 0, 3)
-        g2.addWidget(QLabel("Min"), 0, 4, Qt.AlignCenter)
-        g2.addWidget(QLabel("Max"), 0, 5, Qt.AlignCenter)
+        # Header
+        for col, text in enumerate(["", "Min", "Max", "", "Min", "Max"]):
+            label = QLabel(text)
+            if text in ["Min", "Max"]:
+                label.setFont(header_font)
+                label.setAlignment(Qt.AlignCenter)
+                label.setStyleSheet("color: #2c3e50; background-color: #f8f9fa; padding: 4px; border-radius: 3px;")
+            g2.addWidget(label, 0, col)
 
-        bc_min = QLineEdit("5")
-        bc_max = QLineEdit("100")
-
-        g2.addWidget(QLabel("Body Contrast:"), 1, 0)
+        # Body Contrast
+        bc_min = self._create_line_edit("5")
+        bc_max = self._create_line_edit("100")
+        g2.addWidget(self._create_label("Body Contrast:"), 1, 0)
         g2.addWidget(bc_min, 1, 1)
         g2.addWidget(bc_max, 1, 2)
-
         self._numeric_fields["body_contrast_min"] = bc_min
         self._numeric_fields["body_contrast_max"] = bc_max
 
-        tc_min = QLineEdit("6")
-        tc_max = QLineEdit("20")
-
-        g2.addWidget(QLabel("Terminal Contrast:"), 2, 0)
+        # Terminal Contrast
+        tc_min = self._create_line_edit("6")
+        tc_max = self._create_line_edit("20")
+        g2.addWidget(self._create_label("Terminal Contrast:"), 2, 0)
         g2.addWidget(tc_min, 2, 1)
         g2.addWidget(tc_max, 2, 2)
-
         self._numeric_fields["terminal_contrast_min"] = tc_min
         self._numeric_fields["terminal_contrast_max"] = tc_max
 
-        ep_min = QLineEdit("6")
-        ep_max = QLineEdit("20")
-
-        g2.addWidget(QLabel("No. Of Pixels Used for Detecting Edge:"), 3, 0)
+        # Edge Pixels
+        ep_min = self._create_line_edit("6")
+        ep_max = self._create_line_edit("20")
+        g2.addWidget(self._create_label("No. Of Pixels Used for Detecting Edge:"), 3, 0)
         g2.addWidget(ep_min, 3, 1)
         g2.addWidget(ep_max, 3, 2)
-
         self._numeric_fields["edge_pixel_count_min"] = ep_min
         self._numeric_fields["edge_pixel_count_max"] = ep_max
 
-        mc_min = QLineEdit("6")
-        mc_max = QLineEdit("20")
-
-        g2.addWidget(QLabel("No. Of Measurement:"), 4, 0)
+        # Measurement Count
+        mc_min = self._create_line_edit("6")
+        mc_max = self._create_line_edit("20")
+        g2.addWidget(self._create_label("No. Of Measurement:"), 4, 0)
         g2.addWidget(mc_min, 4, 1)
         g2.addWidget(mc_max, 4, 2)
-
         self._numeric_fields["measurement_count_min"] = mc_min
         self._numeric_fields["measurement_count_max"] = mc_max
 
-
-        tso_min = QLineEdit("6")
-        tso_max = QLineEdit("20")
-
-        g2.addWidget(QLabel("Terminal Search Offset:"), 1, 3)
+        # Terminal Search Offset
+        tso_min = self._create_line_edit("6")
+        tso_max = self._create_line_edit("20")
+        g2.addWidget(self._create_label("Terminal Search Offset:"), 1, 3)
         g2.addWidget(tso_min, 1, 4)
         g2.addWidget(tso_max, 1, 5)
-
         self._numeric_fields["terminal_search_offset_min"] = tso_min
         self._numeric_fields["terminal_search_offset_max"] = tso_max
-        top_offset_min = QLineEdit("5")
-        top_offset_max = QLineEdit("20")
 
-        g2.addWidget(QLabel("Top Offset:"), 2, 3)
+        # Top Offset
+        top_offset_min = self._create_line_edit("5")
+        top_offset_max = self._create_line_edit("20")
+        g2.addWidget(self._create_label("Top Offset:"), 2, 3)
         g2.addWidget(top_offset_min, 2, 4)
         g2.addWidget(top_offset_max, 2, 5)
-
         self._numeric_fields["top_offset_min"] = top_offset_min
         self._numeric_fields["top_offset_max"] = top_offset_max
 
-        bottom_offset_min = QLineEdit("5")
-        bottom_offset_max = QLineEdit("20")
-
-        g2.addWidget(QLabel("Bottom Offset:"), 3, 3)
+        # Bottom Offset
+        bottom_offset_min = self._create_line_edit("5")
+        bottom_offset_max = self._create_line_edit("20")
+        g2.addWidget(self._create_label("Bottom Offset:"), 3, 3)
         g2.addWidget(bottom_offset_min, 3, 4)
         g2.addWidget(bottom_offset_max, 3, 5)
-
         self._numeric_fields["bottom_offset_min"] = bottom_offset_min
         self._numeric_fields["bottom_offset_max"] = bottom_offset_max
-
 
         layout.addWidget(grp_dim)
 
         # ---------------- Image Quality Check ----------------
         grp_img = QGroupBox("Image Quality Check")
+        grp_img.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
         g3 = QGridLayout(grp_img)
-        g3.setHorizontalSpacing(16)
-        g3.setVerticalSpacing(8)
+        g3.setHorizontalSpacing(20)
+        g3.setVerticalSpacing(10)
+        g3.setContentsMargins(12, 20, 12, 12)
 
-# Header row
-        g3.addWidget(QLabel(""), 0, 0)
-        g3.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g3.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-        g3.addWidget(QLabel(""), 0, 3)
-        g3.addWidget(QLabel("Min"), 0, 4, Qt.AlignCenter)
-        g3.addWidget(QLabel("Max"), 0, 5, Qt.AlignCenter)
+        # Header
+        for col, text in enumerate(["", "Min", "Max", "", "Min", "Max"]):
+            label = QLabel(text)
+            if text in ["Min", "Max"]:
+                label.setFont(header_font)
+                label.setAlignment(Qt.AlignCenter)
+                label.setStyleSheet("color: #2c3e50; background-color: #f8f9fa; padding: 4px; border-radius: 3px;")
+            g3.addWidget(label, 0, col)
 
-# Body Intensity row
-        bi_min = QLineEdit("0")
-        bi_max = QLineEdit("255")
-
-        g3.addWidget(QLabel("Body Intensity:"), 1, 0)
+        # Body Intensity
+        bi_min = self._create_line_edit("0")
+        bi_max = self._create_line_edit("255")
+        g3.addWidget(self._create_label("Body Intensity:"), 1, 0)
         g3.addWidget(bi_min, 1, 1)
         g3.addWidget(bi_max, 1, 2)
-
         self._numeric_fields["body_intensity_min"] = bi_min
         self._numeric_fields["body_intensity_max"] = bi_max
 
-
-# Terminal Intensity row
-        ti_min = QLineEdit("0")
-        ti_max = QLineEdit("255")
-
-        g3.addWidget(QLabel("Terminal Intensity:"), 1, 3)
+        # Terminal Intensity
+        ti_min = self._create_line_edit("0")
+        ti_max = self._create_line_edit("255")
+        g3.addWidget(self._create_label("Terminal Intensity:"), 1, 3)
         g3.addWidget(ti_min, 1, 4)
         g3.addWidget(ti_max, 1, 5)
-
         self._numeric_fields["terminal_intensity_min"] = ti_min
         self._numeric_fields["terminal_intensity_max"] = ti_max
 
-
         layout.addWidget(grp_img)
+        
         layout.addStretch()
         return tab
 
@@ -298,18 +438,24 @@ class InspectionParametersRangeDialog(QDialog):
     # =================================================
     def _body_inspection_range_tab(self):
         tab = QWidget()
-        grid = QGridLayout(tab)
+        tab.setStyleSheet("background-color: white;")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(15)
+        
+        grid.addWidget(
+            self._styled_minmax_group(
+                "Body Smear",
+                key_prefix="body_smear"
+            ),
+            0, 0
+        )
 
         grid.addWidget(
-    self._minmax_group(
-        "Body Smear",
-        key_prefix="body_smear"
-    ),
-    0, 0
-)
-
-        grid.addWidget(
-            self._minmax_group(
+            self._styled_minmax_group(
                 "Body Stain",
                 key_prefix="body_stain"
             ),
@@ -317,7 +463,7 @@ class InspectionParametersRangeDialog(QDialog):
         )
 
         grid.addWidget(
-            self._minmax_group(
+            self._styled_minmax_group(
                 "Body Edge Chipoff (Black)",
                 key_prefix="body_edge_chipoff_black",
                 short=True
@@ -326,7 +472,7 @@ class InspectionParametersRangeDialog(QDialog):
         )
 
         grid.addWidget(
-            self._minmax_group(
+            self._styled_minmax_group(
                 "Body Edge Chipoff (White)",
                 key_prefix="body_edge_chipoff_white",
                 short=True
@@ -334,8 +480,8 @@ class InspectionParametersRangeDialog(QDialog):
             1, 1
         )
 
-
-        grid.setRowStretch(2, 1)
+        layout.addLayout(grid)
+        layout.addStretch()
         return tab
 
     # =================================================
@@ -343,18 +489,24 @@ class InspectionParametersRangeDialog(QDialog):
     # =================================================
     def _terminal_inspection_range_tab(self):
         tab = QWidget()
-        grid = QGridLayout(tab)
+        tab.setStyleSheet("background-color: white;")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(15)
+        
+        grid.addWidget(
+            self._styled_minmax_group(
+                "Terminal Pogo",
+                key_prefix="terminal_pogo"
+            ),
+            0, 0
+        )
 
         grid.addWidget(
-    self._minmax_group(
-        "Terminal Pogo",
-        key_prefix="terminal_pogo"
-    ),
-    0, 0
-)
-
-        grid.addWidget(
-            self._minmax_group(
+            self._styled_minmax_group(
                 "Incomplete Termination",
                 key_prefix="incomplete_termination"
             ),
@@ -362,7 +514,7 @@ class InspectionParametersRangeDialog(QDialog):
         )
 
         grid.addWidget(
-            self._minmax_group(
+            self._styled_minmax_group(
                 "Terminal Chipoff (Inner)",
                 key_prefix="terminal_chipoff_inner",
                 short=True
@@ -371,7 +523,7 @@ class InspectionParametersRangeDialog(QDialog):
         )
 
         grid.addWidget(
-            self._minmax_group(
+            self._styled_minmax_group(
                 "Terminal Chipoff (Outer)",
                 key_prefix="terminal_chipoff_outer",
                 short=True
@@ -379,291 +531,189 @@ class InspectionParametersRangeDialog(QDialog):
             1, 1
         )
 
-
-        grid.setRowStretch(2, 1)
+        layout.addLayout(grid)
+        layout.addStretch()
         return tab
 
-    
     # =================================================
-# TAB: Pkg Loc & Cam Setup (REFINED UI)
-# =================================================
+    # TAB: Pkg Loc & Cam Setup (REFINED UI)
+    # =================================================
     def _pkg_loc_cam_tab(self):
         tab = QWidget()
-        root = QGridLayout(tab)
-        root.setHorizontalSpacing(20)
-        root.setVerticalSpacing(16)
+        tab.setStyleSheet("background-color: white;")
+        root = QVBoxLayout(tab)
+        root.setContentsMargins(15, 15, 15, 15)
+        root.setSpacing(20)
+
+        # Main container with grid
+        container = QWidget()
+        grid = QGridLayout(container)
+        grid.setHorizontalSpacing(30)
+        grid.setVerticalSpacing(20)
 
         # ---------------- Package Location Parameter ----------------
-        grp_pkg = QGroupBox("Package Location Parameter")
-        g1 = QGridLayout(grp_pkg)
-        g1.setHorizontalSpacing(12)
-        g1.setVerticalSpacing(6)
-
-        g1.addWidget(QLabel(""), 0, 0)
-        g1.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g1.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-
-        self._row(g1, 1, "Contrast:", 0, 50,
-          key_prefix="pkg_loc_contrast")
-
-        self._row(g1, 2, "X Package Shift Tol:", 20, 100,
-                key_prefix="pkg_loc_x_shift_tol")
-
-        self._row(g1, 3, "Y Package Shift Tol:", 20, 100,
-                key_prefix="pkg_loc_y_shift_tol")
-
-        self._row(g1, 4, "X Sampling Size:", 1, 4,
-                key_prefix="pkg_loc_x_sampling")
-
-        self._row(g1, 5, "Y Sampling Size:", 1, 4,
-                key_prefix="pkg_loc_y_sampling")
-
-        self._row(g1, 6, "Max Parallel Angle Tol:", 5, 25,
-                key_prefix="pkg_loc_parallel_angle_tol")
-
-        self._row(g1, 7, "Terminal Height Difference:", 5, 20,
-                key_prefix="pkg_loc_terminal_height_diff")
-
+        grp_pkg = self._styled_section("Package Location Parameter", [
+            ("Contrast:", 0, 50, "pkg_loc_contrast"),
+            ("X Package Shift Tol:", 20, 100, "pkg_loc_x_shift_tol"),
+            ("Y Package Shift Tol:", 20, 100, "pkg_loc_y_shift_tol"),
+            ("X Sampling Size:", 1, 4, "pkg_loc_x_sampling"),
+            ("Y Sampling Size:", 1, 4, "pkg_loc_y_sampling"),
+            ("Max Parallel Angle Tol:", 5, 25, "pkg_loc_parallel_angle_tol"),
+            ("Terminal Height Difference:", 5, 20, "pkg_loc_terminal_height_diff"),
+        ])
+        grid.addWidget(grp_pkg, 0, 0)
 
         # ---------------- Pocket Location Parameter ----------------
-        grp_pocket = QGroupBox("Pocket Location Parameter")
-        g2 = QGridLayout(grp_pocket)
-        g2.setHorizontalSpacing(12)
-        g2.setVerticalSpacing(6)
-
-        g2.addWidget(QLabel(""), 0, 0)
-        g2.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g2.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-
-        self._row(g2, 1, "Pocket Length:", 50, 200,
-          key_prefix="pocket_loc_length")
-
-        self._row(g2, 2, "Pocket Width:", 30, 150,
-                key_prefix="pocket_loc_width")
-
-        self._row(g2, 3, "Outer Stain Contrast:", 5, 20,
-                key_prefix="pocket_loc_outer_stain_contrast")
-
-        self._row(g2, 4, "Outer Stain Min Area:", 10, 100,
-                key_prefix="pocket_loc_outer_stain_min_area")
-
-        self._row(g2, 5, "Outer Stain Min Sqr Size:", 1, 50,
-                key_prefix="pocket_loc_outer_stain_min_sqr")
-
-        self._row(g2, 6, "Outer Stain Insp Width:", 5, 30,
-                key_prefix="pocket_loc_outer_stain_insp_width")
-
-        self._row(g2, 7, "Outer Stain Insp Offset:", 2, 20,
-                key_prefix="pocket_loc_outer_stain_insp_offset")
-
+        grp_pocket = self._styled_section("Pocket Location Parameter", [
+            ("Pocket Length:", 50, 200, "pocket_loc_length"),
+            ("Pocket Width:", 30, 150, "pocket_loc_width"),
+            ("Outer Stain Contrast:", 5, 20, "pocket_loc_outer_stain_contrast"),
+            ("Outer Stain Min Area:", 10, 100, "pocket_loc_outer_stain_min_area"),
+            ("Outer Stain Min Sqr Size:", 1, 50, "pocket_loc_outer_stain_min_sqr"),
+            ("Outer Stain Insp Width:", 5, 30, "pocket_loc_outer_stain_insp_width"),
+            ("Outer Stain Insp Offset:", 2, 20, "pocket_loc_outer_stain_insp_offset"),
+        ])
+        grid.addWidget(grp_pocket, 0, 1)
 
         # ---------------- Camera Setup ----------------
-        grp_cam = QGroupBox("Camera Setup")
-        g3 = QGridLayout(grp_cam)
-        g3.setHorizontalSpacing(12)
-        g3.setVerticalSpacing(6)
+        grp_cam = self._styled_section("Camera Setup", [
+            ("Shutter:", 2, 1000, "camera_shutter"),
+            ("Gain:", 2, 800, "camera_gain"),
+            ("Brightness:", 0, 1, "camera_brightness"),
+        ])
+        grid.addWidget(grp_cam, 1, 0)
 
-        g3.addWidget(QLabel(""), 0, 0)
-        g3.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g3.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-
-        self._row(g3, 1, "Shutter:", 2, 1000,
-          key_prefix="camera_shutter")
-
-        self._row(g3, 2, "Gain:", 2, 800,
-                key_prefix="camera_gain")
-
-        self._row(g3, 3, "Brightness:", 0, 1,
-                key_prefix="camera_brightness")
-
-
-        # ---------------- Layout placement ----------------
-        root.addWidget(grp_pkg, 0, 0)
-        root.addWidget(grp_pocket, 0, 1)
-        root.addWidget(grp_cam, 1, 0)
-
-        # Stretch to match original empty space
-        root.setColumnStretch(0, 1)
-        root.setColumnStretch(1, 1)
-        root.setRowStretch(2, 1)
-
+        root.addWidget(container)
+        root.addStretch()
         return tab
+
     # =================================================
     # TAB: TQS Range (EXACT GROUP MATCH)
     # =================================================
     def _tqs_tab(self):
         tab = QWidget()
-        root = QGridLayout(tab)
-        root.setHorizontalSpacing(24)
-        root.setVerticalSpacing(12)
+        tab.setStyleSheet("background-color: white;")
+        root = QVBoxLayout(tab)
+        root.setContentsMargins(15, 15, 15, 15)
+        root.setSpacing(0)
+
+        # Main container
+        container = QWidget()
+        main_layout = QHBoxLayout(container)
+        main_layout.setSpacing(30)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
         # ================= LEFT COLUMN =================
         left_col = QVBoxLayout()
+        left_col.setSpacing(15)
 
         # ---- Pick Up ----
-        grp_pick = QGroupBox("Pick Up")
-        g1 = QGridLayout(grp_pick)
-        g1.setHorizontalSpacing(10)
-        g1.setVerticalSpacing(6)
-
-        g1.addWidget(QLabel(""), 0, 0)
-        g1.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g1.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-
-        self._row(
-        g1, 1, "Pocket Gap:", 1, 50,
-        key_prefix="tqs_pickup_pocket_gap_1"
-    )
-        self._row(
-            g1, 2, "Pocket Gap:", 1, 50,
-            key_prefix="tqs_pickup_pocket_gap_2"
-    )
-
-
+        grp_pick = self._styled_section("Pick Up", [
+            ("Pocket Gap:", 1, 50, "tqs_pickup_pocket_gap_1"),
+            ("Pocket Gap:", 1, 50, "tqs_pickup_pocket_gap_2"),
+        ])
         left_col.addWidget(grp_pick)
 
         # ---- Sealing Stain Inspection ----
-        grp_stain = QGroupBox("Sealing Stain Inspection")
-        g2 = QGridLayout(grp_stain)
-        g2.setHorizontalSpacing(10)
-        g2.setVerticalSpacing(6)
-
-        g2.addWidget(QLabel(""), 0, 0)
-        g2.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g2.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-
-        self._row(
-        g2, 1, "Contrast:", 1, 200,
-        key_prefix="tqs_sealing_stain_contrast"
-    )
-        self._row(
-            g2, 2, "Min Area:", 10, 2000,
-            key_prefix="tqs_sealing_stain_min_area"
-        )
-        self._row(
-            g2, 3, "Min Sqr Size:", 2, 10,
-            key_prefix="tqs_sealing_stain_min_sqr"
-        )
-
-
+        grp_stain = self._styled_section("Sealing Stain Inspection", [
+            ("Contrast:", 1, 200, "tqs_sealing_stain_contrast"),
+            ("Min Area:", 10, 2000, "tqs_sealing_stain_min_area"),
+            ("Min Sqr Size:", 2, 10, "tqs_sealing_stain_min_sqr"),
+        ])
         left_col.addWidget(grp_stain)
 
         # ---- Inspection Width ----
         grp_width = QGroupBox("Inspection Width")
+        grp_width.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+                font-weight: bold;
+            }
+        """)
         g3 = QGridLayout(grp_width)
-        g3.setHorizontalSpacing(10)
-        g3.setVerticalSpacing(6)
+        g3.setHorizontalSpacing(15)
+        g3.setVerticalSpacing(8)
+        g3.setContentsMargins(12, 20, 12, 12)
 
-        g3.addWidget(QLabel("Left:"), 0, 0)
-        left_min = QLineEdit("50")
-        left_max = QLineEdit("100")
+        header_font = QFont()
+        header_font.setBold(True)
+        
+        for col, text in enumerate(["", "Min", "Max"]):
+            label = QLabel(text)
+            if text in ["Min", "Max"]:
+                label.setFont(header_font)
+                label.setAlignment(Qt.AlignCenter)
+                label.setStyleSheet("color: #2c3e50; background-color: #f8f9fa; padding: 4px; border-radius: 3px;")
+            g3.addWidget(label, 0, col)
 
-        g3.addWidget(left_min, 0, 1)
-        g3.addWidget(left_max, 0, 2)
-
+        # Left
+        left_min = self._create_line_edit("50")
+        left_max = self._create_line_edit("100")
+        g3.addWidget(self._create_label("Left:"), 1, 0)
+        g3.addWidget(left_min, 1, 1)
+        g3.addWidget(left_max, 1, 2)
         self._numeric_fields["tqs_insp_width_left_min"] = left_min
         self._numeric_fields["tqs_insp_width_left_max"] = left_max
 
-
-        g3.addWidget(QLabel("Top:"), 1, 0)
-        top_min = QLineEdit("50")
-        top_max = QLineEdit("100")
-
-        g3.addWidget(top_min, 1, 1)
-        g3.addWidget(top_max, 1, 2)
-
+        # Top
+        top_min = self._create_line_edit("50")
+        top_max = self._create_line_edit("100")
+        g3.addWidget(self._create_label("Top:"), 2, 0)
+        g3.addWidget(top_min, 2, 1)
+        g3.addWidget(top_max, 2, 2)
         self._numeric_fields["tqs_insp_width_top_min"] = top_min
         self._numeric_fields["tqs_insp_width_top_max"] = top_max
 
-
-        g3.addWidget(QLabel("Right:"), 2, 0)
-        right_min = QLineEdit("50")
-        right_max = QLineEdit("100")
-
-        g3.addWidget(right_min, 2, 1)
-        g3.addWidget(right_max, 2, 2)
-
+        # Right
+        right_min = self._create_line_edit("50")
+        right_max = self._create_line_edit("100")
+        g3.addWidget(self._create_label("Right:"), 3, 0)
+        g3.addWidget(right_min, 3, 1)
+        g3.addWidget(right_max, 3, 2)
         self._numeric_fields["tqs_insp_width_right_min"] = right_min
         self._numeric_fields["tqs_insp_width_right_max"] = right_max
 
-
-        g3.addWidget(QLabel("Bottom:"), 3, 0)
-        bottom_min = QLineEdit("50")
-        bottom_max = QLineEdit("100")
-
-        g3.addWidget(bottom_min, 3, 1)
-        g3.addWidget(bottom_max, 3, 2)
-
+        # Bottom
+        bottom_min = self._create_line_edit("50")
+        bottom_max = self._create_line_edit("100")
+        g3.addWidget(self._create_label("Bottom:"), 4, 0)
+        g3.addWidget(bottom_min, 4, 1)
+        g3.addWidget(bottom_max, 4, 2)
         self._numeric_fields["tqs_insp_width_bottom_min"] = bottom_min
         self._numeric_fields["tqs_insp_width_bottom_max"] = bottom_max
-
 
         left_col.addWidget(grp_width)
         left_col.addStretch()
 
         # ================= RIGHT COLUMN =================
         right_col = QVBoxLayout()
+        right_col.setSpacing(15)
 
         # ---- Sealing Shift Inspection ----
-        grp_shift = QGroupBox("Sealing Shift Inspection")
-        g4 = QGridLayout(grp_shift)
-        g4.setHorizontalSpacing(10)
-        g4.setVerticalSpacing(6)
-
-        g4.addWidget(QLabel(""), 0, 0)
-        g4.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g4.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-
-        self._row(
-    g4, 1, "Contrast Left:", 1, 200,
-    key_prefix="tqs_sealing_shift_contrast_left"
-)
-        self._row(
-            g4, 2, "Contrast Right:", 1, 200,
-            key_prefix="tqs_sealing_shift_contrast_right"
-        )
-        self._row(
-            g4, 3, "Tolerance Left:", 1, 30,
-            key_prefix="tqs_sealing_shift_tol_left"
-        )
-        self._row(
-            g4, 4, "Tolerance Right:", 1, 30,
-            key_prefix="tqs_sealing_shift_tol_right"
-        )
-
-
+        grp_shift = self._styled_section("Sealing Shift Inspection", [
+            ("Contrast Left:", 1, 200, "tqs_sealing_shift_contrast_left"),
+            ("Contrast Right:", 1, 200, "tqs_sealing_shift_contrast_right"),
+            ("Tolerance Left:", 1, 30, "tqs_sealing_shift_tol_left"),
+            ("Tolerance Right:", 1, 30, "tqs_sealing_shift_tol_right"),
+        ])
         right_col.addWidget(grp_shift)
 
         # ---- Hole Side Shift ----
-        grp_hole = QGroupBox("Hole Side Shift")
-        g5 = QGridLayout(grp_hole)
-        g5.setHorizontalSpacing(10)
-        g5.setVerticalSpacing(6)
-
-        g5.addWidget(QLabel(""), 0, 0)
-        g5.addWidget(QLabel("Min"), 0, 1, Qt.AlignCenter)
-        g5.addWidget(QLabel("Max"), 0, 2, Qt.AlignCenter)
-
-        self._row(
-    g5, 1, "Contrast:", 50, 200,
-    key_prefix="tqs_hole_shift_contrast"
-)
-        self._row(
-            g5, 2, "Min Width:", 50, 150,
-            key_prefix="tqs_hole_shift_min_width"
-        )
-
-
+        grp_hole = self._styled_section("Hole Side Shift", [
+            ("Contrast:", 50, 200, "tqs_hole_shift_contrast"),
+            ("Min Width:", 50, 150, "tqs_hole_shift_min_width"),
+        ])
         right_col.addWidget(grp_hole)
         right_col.addStretch()
 
-        # ================= PLACE COLUMNS =================
-        root.addLayout(left_col, 0, 0)
-        root.addLayout(right_col, 0, 1)
+        # Add columns to main layout
+        main_layout.addLayout(left_col)
+        main_layout.addLayout(right_col)
+        main_layout.setStretch(0, 1)
+        main_layout.setStretch(1, 1)
 
-        root.setColumnStretch(0, 1)
-        root.setColumnStretch(1, 1)
-
+        root.addWidget(container)
+        root.addStretch()
         return tab
 
     # =================================================
@@ -671,15 +721,25 @@ class InspectionParametersRangeDialog(QDialog):
     # =================================================
     def _inspection_item_selection_tab(self) -> QWidget:
         tab = QWidget()
+        tab.setStyleSheet("background-color: white;")
         root = QVBoxLayout(tab)
-        root.setSpacing(10)
+        root.setSpacing(15)
+        root.setContentsMargins(15, 15, 15, 15)
 
         # ---------------- Package & Pocket Location ----------------
         grp_pkg = QGroupBox("Package & Pocket Location Parameters")
+        grp_pkg.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
         h = QHBoxLayout(grp_pkg)
-        self.chk_package_location = QCheckBox("Package Location Inspection")
-        self.chk_pocket_location = QCheckBox("Pocket Location Inspection")
-        self.chk_pocket_post_seal = QCheckBox("Pocket Post Seal")
+        h.setContentsMargins(12, 20, 12, 12)
+        h.setSpacing(20)
+        
+        self.chk_package_location = self._create_checkbox("Package Location Inspection")
+        self.chk_pocket_location = self._create_checkbox("Pocket Location Inspection")
+        self.chk_pocket_post_seal = self._create_checkbox("Pocket Post Seal")
 
         h.addWidget(self.chk_package_location)
         h.addWidget(self.chk_pocket_location)
@@ -696,114 +756,133 @@ class InspectionParametersRangeDialog(QDialog):
 
        # ---------------- Dimension Measurement ----------------
         grp_dim = QGroupBox("Dimension Measurement")
+        grp_dim.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
         g_dim = QGridLayout(grp_dim)
+        g_dim.setContentsMargins(12, 20, 12, 12)
         g_dim.setHorizontalSpacing(30)
+        g_dim.setVerticalSpacing(10)
 
-        self.chk_body_length = QCheckBox("Body Length")
-        self.chk_terminal_width = QCheckBox("Terminal Width")
-        self.chk_term_term_length = QCheckBox("Term-Term Length")
-        self.chk_body_width = QCheckBox("Body Width")
-        self.chk_terminal_length = QCheckBox("Terminal Length")
-        self.chk_adjust_pkgloc = QCheckBox("Adjust PkgLoc By Body Height")
+        self.chk_body_length = self._create_checkbox("Body Length")
+        self.chk_terminal_width = self._create_checkbox("Terminal Width")
+        self.chk_term_term_length = self._create_checkbox("Term-Term Length")
+        self.chk_body_width = self._create_checkbox("Body Width")
+        self.chk_terminal_length = self._create_checkbox("Terminal Length")
+        self.chk_adjust_pkgloc = self._create_checkbox("Adjust PkgLoc By Body Height")
 
         self._inspection_checkboxes.update({
-    "check_body_length": self.chk_body_length,
-    "check_terminal_width": self.chk_terminal_width,
-    "check_term_term_length": self.chk_term_term_length,
-    "check_body_width": self.chk_body_width,
-    "check_terminal_length": self.chk_terminal_length,
-    "adjust_pkgloc_by_body_height": self.chk_adjust_pkgloc,
-})
+            "check_body_length": self.chk_body_length,
+            "check_terminal_width": self.chk_terminal_width,
+            "check_term_term_length": self.chk_term_term_length,
+            "check_body_width": self.chk_body_width,
+            "check_terminal_length": self.chk_terminal_length,
+            "adjust_pkgloc_by_body_height": self.chk_adjust_pkgloc,
+        })
 
+        g_dim.addWidget(self.chk_body_length, 0, 0)
+        g_dim.addWidget(self.chk_body_width, 0, 1)
+        g_dim.addWidget(self.chk_terminal_length, 1, 0)
+        g_dim.addWidget(self.chk_terminal_width, 1, 1)
+        g_dim.addWidget(self.chk_term_term_length, 2, 0)
+        g_dim.addWidget(self.chk_adjust_pkgloc, 2, 1)
 
         root.addWidget(grp_dim)
 
-
         # ---------------- Main Grid ----------------
-        mid = QGridLayout()
-        mid.setHorizontalSpacing(16)
-        mid.setVerticalSpacing(12)
+        scroll_content = QWidget()
+        mid = QGridLayout(scroll_content)
+        mid.setHorizontalSpacing(20)
+        mid.setVerticalSpacing(15)
 
         # ===== COLUMN 1 =====
-        mid.addWidget(self._check_group("Terminal Inspection", [
-    ("Terminal Pogo", "check_terminal_pogo"),
-    ("Incomplete Termination 1", "check_incomplete_termination_1"),
-    ("Incomplete Termination 2", "check_incomplete_termination_2"),
-    ("Terminal Length Difference", "check_terminal_length_diff"),
-    ("Terminal to Body Gap", "check_terminal_to_body_gap"),
-    ("Terminal Color", "check_terminal_color"),
-    ("Terminal Oxidation", "check_terminal_oxidation"),
-]), 0, 0)
+        mid.addWidget(self._styled_check_group("Terminal Inspection", [
+            ("Terminal Pogo", "check_terminal_pogo"),
+            ("Incomplete Termination 1", "check_incomplete_termination_1"),
+            ("Incomplete Termination 2", "check_incomplete_termination_2"),
+            ("Terminal Length Difference", "check_terminal_length_diff"),
+            ("Terminal to Body Gap", "check_terminal_to_body_gap"),
+            ("Terminal Color", "check_terminal_color"),
+            ("Terminal Oxidation", "check_terminal_oxidation"),
+        ]), 0, 0)
 
+        mid.addWidget(self._styled_check_group("Body Crack", [
+            ("Body Crack", "check_body_crack"),
+            ("Low And High Contrast Reject", "check_low_high_contrast"),
+            ("Black Defect", "check_black_defect"),
+            ("White Defect", "check_white_defect"),
+        ]), 1, 0)
 
-        mid.addWidget(self._check_group("Body Crack", [
-    ("Body Crack", "check_body_crack"),
-    ("Low And High Contrast Reject", "check_low_high_contrast"),
-    ("Black Defect", "check_black_defect"),
-    ("White Defect", "check_white_defect"),
-]), 1, 0)
-
-
-        mid.addWidget(self._check_group("Body Inspection", [
-    ("Body Stain 1", "check_body_stain_1"),
-    ("Body Stain 2", "check_body_stain_2"),
-    ("Body Color", "check_body_color"),
-    ("Body to Term Body Width", "check_body_to_term_width"),
-    ("Body Width Difference", "check_body_width_diff"),
-]), 2, 0)
-
+        mid.addWidget(self._styled_check_group("Body Inspection", [
+            ("Body Stain 1", "check_body_stain_1"),
+            ("Body Stain 2", "check_body_stain_2"),
+            ("Body Color", "check_body_color"),
+            ("Body to Term Body Width", "check_body_to_term_width"),
+            ("Body Width Difference", "check_body_width_diff"),
+        ]), 2, 0)
 
         # ===== COLUMN 2 =====
-        mid.addWidget(self._check_group("Terminal Chipoff", [
-    ("Inner Term Chipoff", "check_inner_term_chipoff"),
-    ("Outer Term Chipoff", "check_outer_term_chipoff"),
-]), 0, 1)
+        mid.addWidget(self._styled_check_group("Terminal Chipoff", [
+            ("Inner Term Chipoff", "check_inner_term_chipoff"),
+            ("Outer Term Chipoff", "check_outer_term_chipoff"),
+        ]), 0, 1)
 
+        mid.addWidget(self._styled_check_group("Inspection Width", [
+            ("Left", "check_insp_width_left"),
+            ("Right", "check_insp_width_right"),
+            ("Top", "check_insp_width_top"),
+            ("Bottom", "check_insp_width_bottom"),
+        ]), 1, 1)
 
-        mid.addWidget(self._check_group("Inspection Width", [
-    ("Left", "check_insp_width_left"),
-    ("Right", "check_insp_width_right"),
-    ("Top", "check_insp_width_top"),
-    ("Bottom", "check_insp_width_bottom"),
-]), 1, 1)
-
-
-        mid.addWidget(self._check_group("Body Smear", [
-    ("Body Smear 1", "check_body_smear_1"),
-    ("Body Smear 2", "check_body_smear_2"),
-    ("Body Smear 3", "check_body_smear_3"),
-    ("Reverse Chip Check", "check_reverse_chip"),
-    ("White", "check_smear_white"),
-]), 2, 1)
-
+        mid.addWidget(self._styled_check_group("Body Smear", [
+            ("Body Smear 1", "check_body_smear_1"),
+            ("Body Smear 2", "check_body_smear_2"),
+            ("Body Smear 3", "check_body_smear_3"),
+            ("Reverse Chip Check", "check_reverse_chip"),
+            ("White", "check_smear_white"),
+        ]), 2, 1)
 
         # ===== COLUMN 3 =====
-        mid.addWidget(self._check_group("Body Edge Inspection", [
-    ("Body Edge Black Defect", "check_body_edge_black"),
-    ("Body Edge White Defect", "check_body_edge_white"),
-]), 0, 2)
-
+        mid.addWidget(self._styled_check_group("Body Edge Inspection", [
+            ("Body Edge Black Defect", "check_body_edge_black"),
+            ("Body Edge White Defect", "check_body_edge_white"),
+        ]), 0, 2)
 
         # ===== COLUMN 4 =====
-        mid.addWidget(self._check_group("TQS Inspection", [
-    ("Enable Sealing Stain", "enable_sealing_stain"),
-    ("Enable Sealing Stain2", "enable_sealing_stain2"),
-    ("Enable Sealing Shift", "enable_sealing_shift"),
-    ("Black To White Scar", "enable_black_to_white_scar"),
-    ("Hole Reference", "enable_hole_reference"),
-    ("White To Black Scan", "enable_white_to_black_scan"),
-    ("Enable Emboss Tape Pick Up", "enable_emboss_tape_pickup"),
-]), 0, 3, 2, 1)
-
+        mid.addWidget(self._styled_check_group("TQS Inspection", [
+            ("Enable Sealing Stain", "enable_sealing_stain"),
+            ("Enable Sealing Stain2", "enable_sealing_stain2"),
+            ("Enable Sealing Shift", "enable_sealing_shift"),
+            ("Black To White Scar", "enable_black_to_white_scar"),
+            ("Hole Reference", "enable_hole_reference"),
+            ("White To Black Scan", "enable_white_to_black_scan"),
+            ("Enable Emboss Tape Pick Up", "enable_emboss_tape_pickup"),
+        ], rows=2), 0, 3, 2, 1)
 
         # ---- Auto Fill Parameters ----
         grp_auto = QGroupBox("Auto Fill Parameters")
+        grp_auto.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
         g_auto = QGridLayout(grp_auto)
-        g_auto.setHorizontalSpacing(10)
+        g_auto.setContentsMargins(12, 20, 12, 12)
+        g_auto.setHorizontalSpacing(15)
+        g_auto.setVerticalSpacing(8)
 
-        g_auto.addWidget(QLabel(""), 0, 0)
-        g_auto.addWidget(QLabel("Min"), 0, 1)
-        g_auto.addWidget(QLabel("Max"), 0, 2)
+        header_font = QFont()
+        header_font.setBold(True)
+        
+        for col, text in enumerate(["", "Min", "Max"]):
+            label = QLabel(text)
+            if text in ["Min", "Max"]:
+                label.setFont(header_font)
+                label.setAlignment(Qt.AlignCenter)
+                label.setStyleSheet("color: #2c3e50; background-color: #f8f9fa; padding: 4px; border-radius: 3px;")
+            g_auto.addWidget(label, 0, col)
 
         auto_items = [
             "Body Length",
@@ -812,7 +891,7 @@ class InspectionParametersRangeDialog(QDialog):
             "Term to Term Length"
         ]
         for i, txt in enumerate(auto_items, start=1):
-            chk = QCheckBox(txt)
+            chk = self._create_checkbox(txt)
             g_auto.addWidget(chk, i, 0)
 
             field_map = {
@@ -824,30 +903,48 @@ class InspectionParametersRangeDialog(QDialog):
 
             self._inspection_checkboxes[field_map[txt]] = chk
 
-            g_auto.addWidget(QLineEdit("20"), i, 1)
-            g_auto.addWidget(QLineEdit("20"), i, 2)
+            min_edit = self._create_line_edit("20")
+            max_edit = self._create_line_edit("20")
+            g_auto.addWidget(min_edit, i, 1)
+            g_auto.addWidget(max_edit, i, 2)
 
         mid.addWidget(grp_auto, 2, 3)
 
-        root.addLayout(mid)
-        root.addStretch()
+        # Add scroll area for the main content
+        scroll = QScrollArea()
+        scroll.setWidget(scroll_content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        root.addWidget(scroll)
 
         return tab
-    
-        
-
-
 
     # =================================================
-    # HELPERS
+    # HELPER METHODS FOR STYLING
     # =================================================
-    def _minmax_group(self, title, key_prefix=None, short=False):
+    def _styled_minmax_group(self, title, key_prefix=None, short=False):
         grp = QGroupBox(title)
+        grp.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
         g = QGridLayout(grp)
+        g.setHorizontalSpacing(15)
+        g.setVerticalSpacing(8)
+        g.setContentsMargins(12, 20, 12, 12)
 
-        g.addWidget(QLabel(""), 0, 0)
-        g.addWidget(QLabel("Min"), 0, 1)
-        g.addWidget(QLabel("Max"), 0, 2)
+        header_font = QFont()
+        header_font.setBold(True)
+        
+        for col, text in enumerate(["", "Min", "Max"]):
+            label = QLabel(text)
+            if text in ["Min", "Max"]:
+                label.setFont(header_font)
+                label.setAlignment(Qt.AlignCenter)
+                label.setStyleSheet("color: #2c3e50; background-color: #f8f9fa; padding: 4px; border-radius: 3px;")
+            g.addWidget(label, 0, col)
 
         rows = ["contrast", "min_area", "min_sqr_size"]
         if not short:
@@ -855,44 +952,153 @@ class InspectionParametersRangeDialog(QDialog):
 
         for r, field in enumerate(rows, start=1):
             label = field.replace("_", " ").title() + ":"
-            g.addWidget(QLabel(label), r, 0)
+            g.addWidget(self._create_label(label), r, 0)
 
-            min_edit = QLineEdit("1")
-            max_edit = QLineEdit("20")
+            min_edit = self._create_line_edit("1")
+            max_edit = self._create_line_edit("20")
 
             g.addWidget(min_edit, r, 1)
             g.addWidget(max_edit, r, 2)
 
-            # ✅ Only register fields if key_prefix is provided
             if key_prefix is not None:
                 self._numeric_fields[f"{key_prefix}_{field}_min"] = min_edit
                 self._numeric_fields[f"{key_prefix}_{field}_max"] = max_edit
 
         return grp
 
+    def _styled_section(self, title, rows):
+        """Create a styled section with multiple rows"""
+        grp = QGroupBox(title)
+        grp.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
+        g = QGridLayout(grp)
+        g.setHorizontalSpacing(15)
+        g.setVerticalSpacing(8)
+        g.setContentsMargins(12, 20, 12, 12)
 
-
+        header_font = QFont()
+        header_font.setBold(True)
         
+        for col, text in enumerate(["", "Min", "Max"]):
+            label = QLabel(text)
+            if text in ["Min", "Max"]:
+                label.setFont(header_font)
+                label.setAlignment(Qt.AlignCenter)
+                label.setStyleSheet("color: #2c3e50; background-color: #f8f9fa; padding: 4px; border-radius: 3px;")
+            g.addWidget(label, 0, col)
 
+        for i, (label, vmin, vmax, key_prefix) in enumerate(rows, start=1):
+            g.addWidget(self._create_label(label), i, 0)
+            
+            min_edit = self._create_line_edit(str(vmin))
+            max_edit = self._create_line_edit(str(vmax))
+            
+            g.addWidget(min_edit, i, 1)
+            g.addWidget(max_edit, i, 2)
+            
+            self._numeric_fields[f"{key_prefix}_min"] = min_edit
+            self._numeric_fields[f"{key_prefix}_max"] = max_edit
+
+        return grp
+
+    def _styled_check_group(self, title: str, items: list[tuple[str, str]], rows=1) -> QGroupBox:
+        grp = QGroupBox(title)
+        grp.setStyleSheet("""
+            QGroupBox {
+                font-size: 12px;
+            }
+        """)
+        layout = QVBoxLayout(grp)
+        layout.setContentsMargins(12, 20, 12, 12)
+        layout.setSpacing(6)
+
+        for label, field_name in items:
+            chk = self._create_checkbox(label)
+            layout.addWidget(chk)
+            self._inspection_checkboxes[field_name] = chk
+
+        if rows > 1:
+            layout.addStretch()
+        
+        return grp
+
+    def _create_line_edit(self, text=""):
+        """Create a styled line edit"""
+        edit = QLineEdit(text)
+        edit.setAlignment(Qt.AlignCenter)
+        edit.setFixedHeight(24)
+        edit.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #dcdcdc;
+                border-radius: 3px;
+                padding: 2px 6px;
+                background-color: white;
+                selection-background-color: #3498db;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3498db;
+                background-color: #f8f9fa;
+            }
+        """)
+        return edit
+
+    def _create_label(self, text):
+        """Create a styled label"""
+        label = QLabel(text)
+        label.setStyleSheet("color: #333333;")
+        return label
+
+    def _create_checkbox(self, text):
+        """Create a styled checkbox"""
+        checkbox = QCheckBox(text)
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #333333;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #cccccc;
+                border-radius: 3px;
+                background-color: white;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #3498db;
+                border: 1px solid #2980b9;
+                image: url();
+            }
+            QCheckBox::indicator:hover {
+                border: 1px solid #3498db;
+            }
+        """)
+        return checkbox
+
+    def _make_scrollable(self, widget: QWidget) -> QWidget:
+        scroll = QScrollArea(self)
+        scroll.setWidget(widget)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        return scroll
 
     def _row(
-    self,
-    grid,
-    row,
-    label,
-    vmin,
-    vmax,
-    key_prefix=None,
-    col=0
-):
-        """
-        If key_prefix is provided → values are saved
-        If key_prefix is None → UI-only row
-        """
-        grid.addWidget(QLabel(label), row, col)
+        self,
+        grid,
+        row,
+        label,
+        vmin,
+        vmax,
+        key_prefix=None,
+        col=0
+    ):
+        grid.addWidget(self._create_label(label), row, col)
 
-        min_edit = QLineEdit(str(vmin))
-        max_edit = QLineEdit(str(vmax))
+        min_edit = self._create_line_edit(str(vmin))
+        max_edit = self._create_line_edit(str(vmax))
 
         grid.addWidget(min_edit, row, col + 1)
         grid.addWidget(max_edit, row, col + 2)
@@ -901,59 +1107,65 @@ class InspectionParametersRangeDialog(QDialog):
             self._numeric_fields[f"{key_prefix}_min"] = min_edit
             self._numeric_fields[f"{key_prefix}_max"] = max_edit
 
-
     def _check_group(self, title: str, items: list[tuple[str, str]]) -> QGroupBox:
-        """
-        items = [(checkbox_label, dataclass_field_name)]
-        """
         grp = QGroupBox(title)
         layout = QVBoxLayout(grp)
 
         for label, field_name in items:
-            chk = QCheckBox(label)
+            chk = self._create_checkbox(label)
             layout.addWidget(chk)
-
-            # REGISTER CHECKBOX
             self._inspection_checkboxes[field_name] = chk
 
         return grp
-   
 
-    
-
+    # =================================================
+    # BUSINESS LOGIC METHODS (UNCHANGED)
+    # =================================================
     def _apply_to_model(self):
-        ip = self.parent().inspection_parameters
+        # Use the current station's parameters instead of the global one
+        ip = self.parent().current_params()
 
-        # ---- numeric fields ----
+        # ---- numeric fields (station-specific) ----
         for key, widget in self._numeric_fields.items():
             try:
                 ip.ranges[key] = int(widget.text())
             except ValueError:
                 ip.ranges[key] = 0
 
-        # ---- checkbox fields ----
+        # ---- checkbox fields (shared across stations) ----
+        shared_flags = self.parent().shared_flags
         for key, checkbox in self._inspection_checkboxes.items():
-            ip.flags[key] = checkbox.isChecked()
+            shared_flags[key] = checkbox.isChecked()
 
         ip.is_defined = True
-        save_parameters(ip)
 
+        # Save shared flags to inspection_parameters.json, preserve other fields
+        shared_model = load_parameters()
+        shared_model.flags = shared_flags
+        save_parameters(shared_model)
 
+        # Save station-specific ranges/teach data
+        save_teach_data(self.parent().inspection_parameters_by_station)
 
     def _on_apply(self):
         self._apply_to_model()
+        self.parent().on_inspection_parameters_changed()
 
     def _on_ok(self):
         self._apply_to_model()
+        self.parent().on_inspection_parameters_changed()
         self.accept()
-    def _load_from_model(self):
-        ip = self.parent().inspection_parameters
 
+
+    def _load_from_model(self):
+        # Use the current station's parameters instead of the global one
+        ip = self.parent().current_params()
+
+        # Numeric fields remain station-specific
         for key, widget in self._numeric_fields.items():
             widget.setText(str(ip.ranges.get(key, 0)))
 
+        # Inspection item selection is shared across stations
+        shared_flags = self.parent().shared_flags
         for key, checkbox in self._inspection_checkboxes.items():
-            checkbox.setChecked(ip.flags.get(key, False))
-
-
-
+            checkbox.setChecked(shared_flags.get(key, False))

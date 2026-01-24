@@ -21,12 +21,68 @@ class ParaMarkConfigDialog(QDialog):
         self._build_ui()
 
     def _build_ui(self):
-        main = QVBoxLayout(self)
-        main.setSpacing(10)
+        self.setStyleSheet("""
+            QDialog {
+                background: #f7f7f7;
+                font-size: 13px;
+            }
 
-        # ================= Main Two Panels =================
+            QLabel {
+                color: #2b2b2b;
+            }
+
+            QLineEdit {
+                height: 28px;
+                padding: 4px 6px;
+                border: 1px solid #bdbdbd;
+                border-radius: 4px;
+                background: white;
+            }
+
+            QListWidget {
+                border: 1px solid #bdbdbd;
+                border-radius: 4px;
+                background: white;
+            }
+
+            QGroupBox {
+                border: 1px solid #cfcfcf;
+                border-radius: 6px;
+                margin-top: 14px;
+                padding-top: 10px;
+                font-weight: 600;
+                color: #333;
+            }
+
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 6px;
+                background: #f7f7f7;
+            }
+
+            QPushButton {
+                height: 28px;
+                min-width: 70px;
+                border-radius: 4px;
+                background: #e6e6e6;
+                border: 1px solid #bdbdbd;
+                font-weight: 600;
+            }
+
+            QPushButton:hover {
+                background: #dcdcdc;
+            }
+        """)
+
+        main = QVBoxLayout(self)
+        main.setContentsMargins(16, 16, 16, 16)
+        main.setSpacing(12)
+
+        # ================= Panels =================
         panels = QHBoxLayout()
-        panels.setSpacing(12)
+        panels.setSpacing(14)
 
         # ---------- PARA FILE ----------
         grp_para = QGroupBox("PARA FILE")
@@ -34,15 +90,14 @@ class ParaMarkConfigDialog(QDialog):
         para_layout.setHorizontalSpacing(10)
         para_layout.setVerticalSpacing(8)
 
-        para_layout.addWidget(QLabel("Scan No:"), 0, 0)
+        para_layout.addWidget(QLabel("Scan No"), 0, 0)
         self.para_scan_no = QLineEdit()
         para_layout.addWidget(self.para_scan_no, 0, 1)
 
         btn_para_add = QPushButton("Add")
-        btn_para_add.setFixedWidth(70)
         para_layout.addWidget(btn_para_add, 0, 2, 2, 1)
 
-        para_layout.addWidget(QLabel("Config Name:"), 1, 0)
+        para_layout.addWidget(QLabel("Config Name"), 1, 0)
         self.para_config_name = QLineEdit()
         para_layout.addWidget(self.para_config_name, 1, 1)
 
@@ -50,7 +105,6 @@ class ParaMarkConfigDialog(QDialog):
         para_layout.addWidget(self.para_list, 2, 0, 1, 2)
 
         btn_para_remove = QPushButton("Remove")
-        btn_para_remove.setFixedWidth(70)
         para_layout.addWidget(btn_para_remove, 2, 2, Qt.AlignTop)
 
         panels.addWidget(grp_para)
@@ -61,15 +115,14 @@ class ParaMarkConfigDialog(QDialog):
         mark_layout.setHorizontalSpacing(10)
         mark_layout.setVerticalSpacing(8)
 
-        mark_layout.addWidget(QLabel("Scan No:"), 0, 0)
+        mark_layout.addWidget(QLabel("Scan No"), 0, 0)
         self.mark_scan_no = QLineEdit()
         mark_layout.addWidget(self.mark_scan_no, 0, 1)
 
         btn_mark_add = QPushButton("Add")
-        btn_mark_add.setFixedWidth(70)
         mark_layout.addWidget(btn_mark_add, 0, 2, 2, 1)
 
-        mark_layout.addWidget(QLabel("Mark Symbol:"), 1, 0)
+        mark_layout.addWidget(QLabel("Mark Symbol"), 1, 0)
         self.mark_symbol = QLineEdit()
         mark_layout.addWidget(self.mark_symbol, 1, 1)
 
@@ -77,7 +130,6 @@ class ParaMarkConfigDialog(QDialog):
         mark_layout.addWidget(self.mark_list, 2, 0, 1, 2)
 
         btn_mark_remove = QPushButton("Remove")
-        btn_mark_remove.setFixedWidth(70)
         mark_layout.addWidget(btn_mark_remove, 2, 2, Qt.AlignTop)
 
         panels.addWidget(grp_mark)

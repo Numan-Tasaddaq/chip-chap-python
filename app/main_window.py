@@ -5,16 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QSize, QTimer, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QFont, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QToolBar, QComboBox, QPushButton, QSplitter,
-    QTableWidget, QMessageBox,QSlider
+    QTableWidget, QMessageBox, QSlider, QSizePolicy, QMenu, QFrame, QToolButton, QDialog
 )
 import cv2
 from PySide6.QtGui import QImage, QPixmap
-
+from fastapi import params
 # ✅ IMPORT REAL DIALOGS
 from ui.inspection_parameters_range_dialog import InspectionParametersRangeDialog
 from ui.lot_information_dialog import LotInformationDialog
@@ -30,12 +30,19 @@ from ui.alert_messages_dialog import AlertMessagesDialog
 from ui.ignore_fail_count_dialog import IgnoreFailCountDialog
 from ui.autorun_setting_dialog import AutoRunSettingDialog
 from ui.autorun_withdraw_setting_dialog import AutoRunWithDrawSettingDialog
+from ui.step_debug_dialog import StepDebugDialog
 from imaging.grab_service import GrabService
 from imaging.image_loader import ImageLoader
 from config.inspection_parameters import InspectionParameters
 from config.inspection_parameters_io import load_parameters
 from imaging.pocket_teach_overlay import PocketTeachOverlay
 from ui.image_rotation_dialog import ImageRotationDialog
+from config.teach_store import load_teach_data
+from config.teach_store import save_teach_data
+from tests.test_top_bottom import test_top_bottom, test_feed
+from tests.test_runner import TestResult, TestStatus
+from pathlib import Path
+from datetime import datetime
 
 # ================= ENUMS & STATE =================
 class TeachPhase(Enum):
@@ -81,7 +88,9 @@ class MainWindow(QMainWindow):
         self.current_image=None
        
 
+        # Shared inspection flags (one set for all stations)
         self.inspection_parameters = load_parameters()
+        self.shared_flags = self.inspection_parameters.flags
 
         self.grab_service=GrabService(self)
         self.image_loader = ImageLoader(self)
@@ -90,6 +99,7 @@ class MainWindow(QMainWindow):
         self.binary_threshold = 75  # default (PDF example)
         self.is_teach_mode = False
         self.teach_overlay = None
+        self.step_mode_enabled = False  # Step-by-step debug mode toggle
         
         # Zoom variables
         self.zoom_level = 1.0
@@ -100,98 +110,317 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
         self._build_main_toolbar()
         self._build_track_bar()
+        self._on_track_changed(self.track_combo.currentIndex())
 
         self._build_center_layout()
 
 
+        self._update_active_track_ui()
 
         self._apply_run_state()
+        self.inspection_parameters_by_station = {
+            Station.FEED: InspectionParameters(),
+            Station.TOP: InspectionParameters(),
+            Station.BOTTOM: InspectionParameters(),
+        }
+        loaded = load_teach_data()
+        for station_name, params in loaded.items():
+            self.inspection_parameters_by_station[Station(station_name)] = params
 
+        # Ensure all stations point to the shared flags
+        for params in self.inspection_parameters_by_station.values():
+            params.flags = self.shared_flags
+
+        # Also keep the global inspection_parameters in sync with shared flags
+        self.inspection_parameters.flags = self.shared_flags
+
+        # Sync station menu to show Feed as default
+        self._sync_station_actions()
+          # =================================================
+    # MENU BAR
     # =================================================
+       # =================================================
     # MENU BAR
     # =================================================
     def _build_menu_bar(self):
         mb = self.menuBar()
+        
+        # Professional gradient styling with subtle shadow
+        mb.setStyleSheet("""
+            QMenuBar {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #34495e, stop:0.3 #2c3e50, stop:1 #1a252f);
+                color: #ffffff;
+                font-weight: 500;
+                font-size: 11pt;
+                padding: 3px 0px;
+                border-bottom: 2px solid #3498db;
+            }
+            QMenuBar::item {
+                padding: 8px 20px;
+                background: transparent;
+                border-radius: 0px;
+                margin: 0px;
+                border-right: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            QMenuBar::item:first {
+                border-left: 1px solid rgba(255, 255, 255, 0.1);
+            }
+            QMenuBar::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(52, 152, 219, 0.3), stop:1 rgba(41, 128, 185, 0.3));
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QMenuBar::item:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(52, 152, 219, 0.5), stop:1 rgba(41, 128, 185, 0.5));
+            }
+        """)
 
         # ---------- Production ----------
-        m_production = mb.addMenu("Production")
+        m_production = mb.addMenu(" Production ")
+        m_production.setStyleSheet("""
+            QMenu {
+                background-color: #ffffff;
+                border: 1px solid #bdc3c7;
+                border-radius: 4px;
+                padding: 6px 0px;
+                margin-top: 4px;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            }
+            QMenu::item {
+                padding: 8px 30px 8px 25px;
+                margin: 1px 8px;
+                border-radius: 3px;
+                color: #2c3e50;
+                font-size: 10pt;
+                min-width: 180px;
+            }
+            QMenu::item:selected {
+                background-color: #3498db;
+                color: white;
+                font-weight: 500;
+            }
+            QMenu::item:disabled {
+                color: #95a5a6;
+                background-color: transparent;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 transparent, stop:0.2 #3498db, stop:0.8 #3498db, stop:1 transparent);
+                margin: 6px 15px;
+            }
+            QMenu::indicator {
+                width: 13px;
+                height: 13px;
+            }
+            QMenu::indicator:checked {
+                background-color: #3498db;
+                border: 2px solid #2980b9;
+                border-radius: 3px;
+            }
+        """)
 
         act_open_lot = QAction("Open Lot", self)
         act_open_lot.triggered.connect(self._open_lot_dialog)
         m_production.addAction(act_open_lot)
 
-        m_production.addAction(
-            QAction("End Lot", self, triggered=lambda: self._stub("End Lot"))
-        )
+        act_end_lot = QAction("End Lot", self)
+        act_end_lot.triggered.connect(lambda: self._stub("End Lot"))
+        m_production.addAction(act_end_lot)
+
+        # ---------- Station Selector ----------
+        m_station = mb.addMenu(" Station ")
+        m_station.setStyleSheet(m_production.styleSheet())
+
+        station_header = QAction("🎯 SELECT STATION", self)
+        station_header.setEnabled(False)
+        station_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_station.addAction(station_header)
+
+        station_group = QActionGroup(self)
+        station_group.setExclusive(True)
+
+        self.act_station_feed = QAction("     Feed", self, checkable=True)
+        self.act_station_top = QAction("     Top", self, checkable=True)
+        self.act_station_bottom = QAction("     Bottom", self, checkable=True)
+
+        self.act_station_feed.triggered.connect(lambda: self._select_station(Station.FEED))
+        self.act_station_top.triggered.connect(lambda: self._select_station(Station.TOP))
+        self.act_station_bottom.triggered.connect(lambda: self._select_station(Station.BOTTOM))
+
+        for act in (self.act_station_feed, self.act_station_top, self.act_station_bottom):
+            station_group.addAction(act)
+            m_station.addAction(act)
+
+        self._sync_station_actions()
+
         m_production.addSeparator()
-        # ✅ Online / Offline (checkable)
-        self.act_online_offline = QAction("Online / Offline", self)
+        
+        # ✅ Online / Offline (checkable) - Special styling
+        self.act_online_offline = QAction("🟢 Online / Offline", self)
         self.act_online_offline.setCheckable(True)
         self.act_online_offline.setChecked(False)  # ONLINE by default
         self.act_online_offline.triggered.connect(self._toggle_online_offline_from_menu)
         m_production.addAction(self.act_online_offline)
 
         # ---------- Engineering ----------
-        m_engineering = mb.addMenu("Engineering")
+        m_engineering = mb.addMenu(" Engineering ")
+        m_engineering.setStyleSheet(m_production.styleSheet())
+        
+        # Binarise with check indicator
         act_binarise = QAction("Binarise Image", self)
         act_binarise.setCheckable(True)
         act_binarise.triggered.connect(self._toggle_binarise)
         m_engineering.addAction(act_binarise)
 
-        act_zoom_in = QAction("Zoom In", self)
+        m_engineering.addSeparator()
+        
+        # Zoom section with subtle header
+        zoom_header = QAction("━━━━━━ ZOOM ━━━━━━", self)
+        zoom_header.setEnabled(False)
+        zoom_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Normal))
+        m_engineering.addAction(zoom_header)
+        
+        act_zoom_in = QAction("     Zoom In", self)
         act_zoom_in.triggered.connect(self._zoom_in)
         m_engineering.addAction(act_zoom_in)
         
-        act_zoom_fit = QAction("Zoom Fit", self)
+        act_zoom_fit = QAction("     Zoom Fit", self)
         act_zoom_fit.triggered.connect(self._zoom_fit)
         m_engineering.addAction(act_zoom_fit)
         
-        act_zoom_out = QAction("Zoom Out", self)
+        act_zoom_out = QAction("     Zoom Out", self)
         act_zoom_out.triggered.connect(self._zoom_out)
         m_engineering.addAction(act_zoom_out)
+        
         m_engineering.addSeparator()
-        act_load_image = QAction("Load Image From Disk", self)
+        
+        # File operations
+        file_header = QAction("━━━━ FILE ━━━━", self)
+        file_header.setEnabled(False)
+        file_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Normal))
+        m_engineering.addAction(file_header)
+        
+        act_load_image = QAction("     Load Image From Disk", self)
         act_load_image.triggered.connect(self.image_loader.load_from_disk)
         m_engineering.addAction(act_load_image)
 
-        m_engineering.addAction(QAction("Save Image To Disk", self, triggered=lambda: self._stub("Save Image To Disk")))
+        act_save_image = QAction("     Save Image To Disk", self)
+        act_save_image.triggered.connect(self._save_current_image)
+        m_engineering.addAction(act_save_image)
+        
         m_engineering.addSeparator()
-        self._add_disabled(m_engineering, "Camera Enable")
-        self._add_disabled(m_engineering, "RunTime Display Enable")
-        self._add_disabled(m_engineering, "Camera AOI Resize Mode")
+        
+        # Disabled features with special visual treatment
+        disabled_header = QAction("━━━ DISABLED FEATURES ━━━", self)
+        disabled_header.setEnabled(False)
+        disabled_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Normal))
+        m_engineering.addAction(disabled_header)
+        
+        self._add_disabled_styled(m_engineering, "     🔒 Camera Enable", QColor("#95a5a6"))
+        self._add_disabled_styled(m_engineering, "     🔒 RunTime Display Enable", QColor("#95a5a6"))
+        self._add_disabled_styled(m_engineering, "     🔒 Camera AOI Resize Mode", QColor("#95a5a6"))
 
         # ---------- Configuration ----------
-        m_config = mb.addMenu("Configuration")
-        m_config.addAction(QAction("Select Config File", self, triggered=lambda: self._stub("Select Config File")))
-        m_config.addAction(QAction("Save Config As", self, triggered=lambda: self._stub("Save Config As")))
-        act_para_mark = QAction("Para & Mark Config File", self)
+        m_config = mb.addMenu(" Configuration ")
+        m_config.setStyleSheet(m_production.styleSheet())
+        
+        # Config file operations
+        config_header = QAction("━━━ CONFIG FILES ━━━", self)
+        config_header.setEnabled(False)
+        config_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Normal))
+        m_config.addAction(config_header)
+        
+        m_config.addAction(QAction("     Select Config File", self, triggered=lambda: self._stub("Select Config File")))
+        m_config.addAction(QAction("     Save Config As", self, triggered=lambda: self._stub("Save Config As")))
+        
+        act_para_mark = QAction("     Para & Mark Config File", self)
         act_para_mark.triggered.connect(self._open_para_mark_config_dialog)
         m_config.addAction(act_para_mark)
         
         m_config.addSeparator()
-        act_device_loc = QAction("Device Location", self)
+        
+        # Location settings with beautiful header
+        location_header = QAction("📍 LOCATION SETTINGS", self)
+        location_header.setEnabled(False)
+        location_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_config.addAction(location_header)
+        
+        act_device_loc = QAction("     Device Location", self)
         act_device_loc.triggered.connect(self._open_device_location_dialog)
         m_config.addAction(act_device_loc)
 
-        act_pocket_loc = QAction("Pocket Location", self)
+        act_pocket_loc = QAction("     Pocket Location", self)
         act_pocket_loc.triggered.connect(self._open_pocket_location_dialog)
         m_config.addAction(act_pocket_loc)
 
-        act_device_inspection = QAction("Device Inspection", self)
+        act_device_inspection = QAction("     Device Inspection", self)
         act_device_inspection.triggered.connect(self._open_device_inspection_dialog)
         m_config.addAction(act_device_inspection)
 
-
-        m_mark = m_config.addMenu("Mark Inspection")
+        # Mark Inspection submenu with special icon
+        m_mark = QMenu("🔤 Mark Inspection", self)
+        m_mark.setStyleSheet("""
+            QMenu {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+                padding: 6px 0px;
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
+            }
+            QMenu::item {
+                padding: 7px 30px 7px 25px;
+                margin: 1px 8px;
+                border-radius: 3px;
+                color: #495057;
+                font-size: 10pt;
+            }
+            QMenu::item:selected {
+                background-color: #e9ecef;
+                color: #212529;
+            }
+        """)
         m_mark.addAction(QAction("Mark Symbol Set", self, triggered=lambda: self._stub("Mark Symbol Set")))
         m_mark.addAction(QAction("Mark Parameters", self, triggered=lambda: self._stub("Mark Parameters")))
         m_mark.addAction(QAction("Mark Symbol Images", self, triggered=lambda: self._stub("Mark Symbol Images")))
+        m_config.addMenu(m_mark)
 
         m_config.addSeparator()
-        self._add_disabled(m_config, "Enable / Disable Inspection")
-        self._add_disabled(m_config, "Camera Configuration")
+        
+        # Disabled configuration items
+        system_header = QAction("⚙️ SYSTEM SETTINGS (DISABLED)", self)
+        system_header.setEnabled(False)
+        system_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_config.addAction(system_header)
+        
+        self._add_disabled_styled(m_config, "     ⚠️ Enable / Disable Inspection", QColor("#95a5a6"))
+        self._add_disabled_styled(m_config, "     ⚠️ Camera Configuration", QColor("#95a5a6"))
 
-        m_color = m_config.addMenu("Color Inspection")
+        # Color Inspection submenu with color palette icon
+        m_color = QMenu("🎨 Color Inspection", self)
+        m_color.setStyleSheet("""
+            QMenu {
+                background-color: #f8f9fa;
+                border: 1px solid #dee2e6;
+                border-radius: 4px;
+                padding: 6px 0px;
+                box-shadow: 0 3px 8px rgba(0, 0, 0, 0.08);
+            }
+            QMenu::item {
+                padding: 8px 30px 8px 25px;
+                margin: 1px 8px;
+                border-radius: 3px;
+                color: #495057;
+                font-size: 10pt;
+            }
+            QMenu::item:selected {
+                background-color: #e9ecef;
+                color: #212529;
+            }
+        """)
         act_body_color = QAction("Body Color", self)
         act_body_color.triggered.connect(self._open_body_color_dialog)
         m_color.addAction(act_body_color)
@@ -199,203 +428,834 @@ class MainWindow(QMainWindow):
         act_terminal_color = QAction("Terminal Color", self)
         act_terminal_color.triggered.connect(self._open_terminal_color_dialog)
         m_color.addAction(act_terminal_color)
+        
         act_mark_color = QAction("Mark Color", self)
         act_mark_color.triggered.connect(self._open_mark_color_dialog)
         m_color.addAction(act_mark_color)
-        
+        m_config.addMenu(m_color)
         
         # ---------- Run ----------
-        m_run = mb.addMenu("Run")
-        m_cycle = m_run.addMenu("Inspect Cycle")
+        m_run = mb.addMenu(" Run ")
+        m_run.setStyleSheet(m_production.styleSheet())
+        
+        # Inspect Cycle submenu
+        m_cycle = QMenu("🔄 Inspect Cycle", self)
+        m_cycle.setStyleSheet(m_mark.styleSheet())
         m_cycle.addAction(QAction("Single Image", self, triggered=lambda: self._stub("Inspect Cycle → Single Image")))
+        m_run.addMenu(m_cycle)
 
-        m_saved = m_run.addMenu("Inspect Saved Images")
+        # Inspect Saved Images submenu
+        m_saved = QMenu("💾 Inspect Saved Images", self)
+        m_saved.setStyleSheet(m_mark.styleSheet())
+        
+        # AutoRun actions with special styling
+        autorun_header = QAction("Auto Run Options", self)
+        autorun_header.setEnabled(False)
+        autorun_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_saved.addAction(autorun_header)
+        
         m_saved.addAction(
-    QAction("AutoRun", self,
-            triggered=lambda: AutoRunSettingDialog(self).exec())
-)
+            QAction("     AutoRun", self,
+                    triggered=lambda: AutoRunSettingDialog(self).exec())
+        )
         m_saved.addAction(
-    QAction("AutoRun With Draw", self,
-            triggered=lambda: AutoRunWithDrawSettingDialog(self).exec())
-)
-        m_saved.addAction(QAction("Step", self, triggered=lambda: self._stub("Step")))
-        m_saved.addAction(QAction("Set Stored Image Folder", self, triggered=lambda: self._stub("Set Stored Image Folder")))
+            QAction("     AutoRun With Draw", self,
+                    triggered=lambda: AutoRunWithDrawSettingDialog(self).exec())
+        )
+        
+        m_saved.addSeparator()
+        
+        standard_header = QAction("Standard Operations", self)
+        standard_header.setEnabled(False)
+        standard_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_saved.addAction(standard_header)
+        
+        m_saved.addAction(QAction("     Step", self, triggered=lambda: self._stub("Step")))
+        m_saved.addAction(QAction("     Set Stored Image Folder", self, triggered=lambda: self._stub("Set Stored Image Folder")))
+        m_run.addMenu(m_saved)
 
         # ---------- Diagnostic ----------
-        m_diag = mb.addMenu("Diagnostic")
+        m_diag = mb.addMenu(" Diagnostic ")
+        m_diag.setStyleSheet(m_production.styleSheet())
+        
+        # Diagnostic tools with icon
+        diag_header = QAction("🔧 DIAGNOSTIC TOOLS", self)
+        diag_header.setEnabled(False)
+        diag_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_diag.addAction(diag_header)
+        
         m_diag.addAction(
-    QAction("Inspection", self, triggered=lambda: InspectionDebugDialog(self).exec())
-)
+            QAction("     Inspection", self, triggered=lambda: InspectionDebugDialog(self).exec())
+        )
 
-        act_range = QAction("Inspection Parameters Range", self)
+        act_range = QAction("     Inspection Parameters Range", self)
         act_range.triggered.connect(self._open_inspection_parameters_range)
         m_diag.addAction(act_range)
 
-        m_diag.addAction(QAction("Enable Step Mode", self, triggered=lambda: self._stub("Enable Step Mode")))
+        m_diag.addSeparator()
+        
+        # Advanced diagnostic
+        advanced_header = QAction("⚡ ADVANCED DIAGNOSTICS", self)
+        advanced_header.setEnabled(False)
+        advanced_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_diag.addAction(advanced_header)
+        
+        act_step_mode = QAction("Enable Step Mode", self, checkable=True)
+        act_step_mode.setChecked(False)
+        act_step_mode.triggered.connect(self._toggle_step_mode)
+        m_diag.addAction(act_step_mode)
         m_diag.addAction(
-    QAction("Alert Messages", self, triggered=lambda: AlertMessagesDialog(self).exec())
-)
-        m_diag.addAction(QAction("Encrypt / Decrypt Images", self, triggered=lambda: self._stub("Encrypt / Decrypt Images")))
+            QAction("     Alert Messages", self, triggered=lambda: AlertMessagesDialog(self).exec())
+        )
+        m_diag.addAction(QAction("     Encrypt / Decrypt Images", self, triggered=lambda: self._stub("Encrypt / Decrypt Images")))
         m_diag.addAction(
-    QAction("Ignore Count", self, triggered=lambda: IgnoreFailCountDialog(self).exec())
-)
+            QAction("     Ignore Count", self, triggered=lambda: IgnoreFailCountDialog(self).exec())
+        )
 
         # ---------- View ----------
-        m_view = mb.addMenu("View")
-        m_view.addAction(QAction("Restore", self, triggered=lambda: self._stub("Restore")))
-        m_view.addAction(QAction("Reset Counters", self, triggered=lambda: self._stub("Reset Counters")))
-        m_view.addAction(QAction("Pass Bin Counters", self, triggered=lambda: self._stub("Pass Bin Counters")))
-        m_view.addAction(QAction("Password Details", self, triggered=lambda: self._stub("Password Details")))
+        m_view = mb.addMenu(" View ")
+        m_view.setStyleSheet(m_production.styleSheet())
+        
+        # View operations with eye icon
+        view_header = QAction("👁 VIEW OPTIONS", self)
+        view_header.setEnabled(False)
+        view_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_view.addAction(view_header)
+        
+        m_view.addAction(QAction("     Restore", self, triggered=lambda: self._stub("Restore")))
+        m_view.addAction(QAction("     Reset Counters", self, triggered=lambda: self._stub("Reset Counters")))
+        m_view.addAction(QAction("     Pass Bin Counters", self, triggered=lambda: self._stub("Pass Bin Counters")))
+        m_view.addAction(QAction("     Password Details", self, triggered=lambda: self._stub("Password Details")))
 
         # ---------- Help ----------
-        m_help = mb.addMenu("Help")
-        m_help.addAction(QAction("About", self, triggered=lambda: self._stub("About")))
+        m_help = mb.addMenu(" Help ")
+        m_help.setStyleSheet(m_production.styleSheet())
+        
+        # Help with question mark icon
+        help_header = QAction("❓ HELP & SUPPORT", self)
+        help_header.setEnabled(False)
+        help_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        m_help.addAction(help_header)
+        
+        m_help.addAction(QAction("     About", self, triggered=lambda: self._stub("About")))
 
     def _add_disabled(self, menu, text):
         a = QAction(text, self)
         a.setEnabled(False)
         menu.addAction(a)
-
+        
+    def _add_disabled_styled(self, menu, text, color=None):
+        """Add disabled action with beautiful styling"""
+        a = QAction(text, self)
+        a.setEnabled(False)
+        # Use a slightly smaller, italic font for disabled items
+        font = QFont("Segoe UI", 9)
+        font.setItalic(True)
+        a.setFont(font)
+        menu.addAction(a)
     # =================================================
+    # TOOLBARS
+    # =================================================
+        # =================================================
     # TOOLBARS
     # =================================================
     def _build_main_toolbar(self):
         tb = QToolBar("MainToolbar")
         tb.setMovable(False)
         tb.setIconSize(QSize(36, 36))
+        
+        # Professional toolbar styling
+        tb.setStyleSheet("""
+            QToolBar {
+                background-color: #f5f7fa;
+                border-bottom: 2px solid #d1d9e6;
+                spacing: 8px;
+                padding: 8px 12px;
+            }
+            QToolBar::separator {
+                width: 1px;
+                background: #c8d0e0;
+                margin: 0 12px;
+            }
+        """)
+        
         self.addToolBar(Qt.TopToolBarArea, tb)
 
-        def add(text):
-            act = QAction(text, self)
-            tb.addAction(act)
-            return act
+        def add_professional_button(text, bg_color="#4a6fa5", hover_color="#385d8a"):
+            """Create a professional looking button with clear disabled state"""
+            btn = QToolButton()
+            btn.setText(text)
+            btn.setFixedSize(90, 38)
+            btn.setStyleSheet(f"""
+                /* ENABLED STATE */
+                QToolButton {{
+                    background-color: {bg_color};
+                    color: white;
+                    border: none;
+                    border-radius: 5px;
+                    font-weight: 600;
+                    font-size: 11pt;
+                    padding: 8px;
+                    letter-spacing: 0.5px;
+                }}
+                QToolButton:hover {{
+                    background-color: {hover_color};
+                }}
+                QToolButton:pressed {{
+                    background-color: #2a4365;
+                    padding-top: 9px;
+                    padding-bottom: 7px;
+                }}
+                
+                /* DISABLED STATE - Very clear visual difference */
+                QToolButton:disabled {{
+                    background-color: #e0e0e0;
+                    color: #9e9e9e;
+                    border: 2px dashed #bdbdbd;
+                    font-weight: normal;
+                    opacity: 0.7;
+                }}
+                
+                /* Checkable button states */
+                QToolButton:checked {{
+                    background-color: #2a4365;
+                    border: 2px solid #1a2d4a;
+                }}
+                QToolButton:checked:disabled {{
+                    background-color: #b0bec5;
+                    color: #757575;
+                    border: 2px dashed #90a4ae;
+                }}
+            """)
+            return btn
 
-        self.act_grab = add("GRAB")
-        self.act_grab.triggered.connect(self.grab_service.grab)
-        self.act_live = add("LIVE")
-        self.act_live.triggered.connect(self.grab_service.toggle_live)
-        self.act_teach = add("TEACH")
-        self.act_teach.triggered.connect(self._on_teach)
-        self.act_test = add("TEST")
-        self.act_next = add("NEXT")
-        self.act_next.triggered.connect(self._on_next)
+        # Button colors for visual grouping
+        colors = {
+            "GRAB": ("#2e7d32", "#1b5e20"),      # Green
+            "LIVE": ("#d32f2f", "#b71c1c"),      # Red
+            "TEACH": ("#ed6c02", "#c55700"),     # Orange
+            "TEST": ("#7b1fa2", "#5d1481"),      # Purple
+            "NEXT": ("#1976d2", "#0d47a1"),      # Blue
+            "ABORT": ("#d32f2f", "#b71c1c"),     # Red
+            "START": ("#2e7d32", "#1b5e20"),     # Green
+            "END": ("#d32f2f", "#b71c1c"),       # Red
+            "OPEN": ("#0288d1", "#01579b"),      # Light Blue
+            "PARA": ("#7b1fa2", "#5d1481"),      # Purple
+            "RESET": ("#757575", "#424242")      # Gray
+        }
 
-        add("ABORT")
-        self.act_start = add("START")
-        self.act_end = add("END")
-        self.act_open = add("OPEN")
-        self.act_para = add("PARA")
-        add("RESET")
+        # Create and add buttons
+        self.act_grab = add_professional_button("GRAB", *colors["GRAB"])
+        self.act_grab.clicked.connect(self.grab_service.grab)
+        tb.addWidget(self.act_grab)
 
-        self.act_start.triggered.connect(self._on_start)
-        self.act_end.triggered.connect(self._on_end)
-        self.act_open.triggered.connect(self._open_lot_dialog)
-        self.act_para.triggered.connect(self._open_device_inspection_dialog)
+        self.act_live = add_professional_button("LIVE", *colors["LIVE"])
+        self.act_live.setCheckable(True)
+        self.act_live.clicked.connect(self.grab_service.toggle_live)
+        tb.addWidget(self.act_live)
+
+        self.act_teach = add_professional_button("TEACH", *colors["TEACH"])
+        self.act_teach.clicked.connect(self._on_teach)
+        tb.addWidget(self.act_teach)
+
+        self.act_test = add_professional_button("TEST", *colors["TEST"])
+        self.act_test.clicked.connect(self._on_test)
+        tb.addWidget(self.act_test)
+
+        self.act_next = add_professional_button("NEXT", *colors["NEXT"])
+        self.act_next.clicked.connect(self._on_next)
+        tb.addWidget(self.act_next)
+
+        tb.addSeparator()
+
+        self.act_abort = add_professional_button("ABORT", *colors["ABORT"])
+        tb.addWidget(self.act_abort)
+
+        self.act_start = add_professional_button("START", *colors["START"])
+        self.act_start.clicked.connect(self._on_start)
+        tb.addWidget(self.act_start)
+
+        self.act_end = add_professional_button("END", *colors["END"])
+        self.act_end.clicked.connect(self._on_end)
+        tb.addWidget(self.act_end)
+
+        self.act_open = add_professional_button("OPEN", *colors["OPEN"])
+        self.act_open.clicked.connect(self._open_lot_dialog)
+        tb.addWidget(self.act_open)
+
+        self.act_para = add_professional_button("PARA", *colors["PARA"])
+        self.act_para.clicked.connect(self._open_device_inspection_dialog)
+        tb.addWidget(self.act_para)
+
+        tb.addSeparator()
+
+        self.act_reset = add_professional_button("RESET", *colors["RESET"])
+        tb.addWidget(self.act_reset)
+
+        # Add flexible spacer
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
 
     def _build_track_bar(self):
         tb = QToolBar("TrackBar")
         tb.setMovable(False)
+        
+        # Clean trackbar styling
+        tb.setStyleSheet("""
+            QToolBar {
+                background-color: #ffffff;
+                border-bottom: 1px solid #e0e0e0;
+                padding: 6px 12px;
+                spacing: 10px;
+            }
+            QToolBar::separator {
+                width: 1px;
+                background: #e0e0e0;
+                margin: 0 15px;
+            }
+        """)
+        
         self.addToolBar(Qt.TopToolBarArea, tb)
 
-        self.btn_track_f = QPushButton("Track1-F")
-        self.btn_track_p = QPushButton("Track1-P")
+        # Track selection section
+        track_label = QLabel("Track Control")
+        track_label.setStyleSheet("""
+            QLabel {
+                color: #37474f;
+                font-weight: 600;
+                font-size: 11pt;
+                padding-right: 10px;
+            }
+        """)
+        tb.addWidget(track_label)
 
-        self.btn_track_f.clicked.connect(lambda: self._set_station(Station.FEED))
-        self.btn_track_p.clicked.connect(lambda: self._set_station(Station.TOP))
+        # Station buttons with clear enabled/disabled states
+        self.btn_track_f = QPushButton("Track1-F")
+        self.btn_track_f.setFixedSize(110, 36)
+        self.btn_track_f.setStyleSheet("""
+            /* ENABLED STATE */
+            QPushButton {
+                background-color: #e3f2fd;
+                color: #1565c0;
+                border: 2px solid #1565c0;
+                border-radius: 5px;
+                font-weight: 600;
+                font-size: 10pt;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #bbdefb;
+            }
+            QPushButton:pressed {
+                background-color: #90caf9;
+            }
+            QPushButton:checked {
+                background-color: #1565c0;
+                color: white;
+                border: 2px solid #0d47a1;
+            }
+            
+            /* DISABLED STATE - Very clear visual difference */
+            QPushButton:disabled {
+                background-color: #f5f5f5;
+                color: #bdbdbd;
+                border: 2px dashed #e0e0e0;
+                font-weight: normal;
+            }
+            QPushButton:checked:disabled {
+                background-color: #cfd8dc;
+                color: #78909c;
+                border: 2px dashed #b0bec5;
+            }
+        """)
+        self.btn_track_f.setCheckable(True)
+        self.btn_track_f.clicked.connect(lambda: self._open_track_folder('f'))
+
+
+        self.btn_track_p = QPushButton("Track1-P")
+        self.btn_track_p.setFixedSize(110, 36)
+        self.btn_track_p.setStyleSheet("""
+            /* ENABLED STATE */
+            QPushButton {
+                background-color: #f3e5f5;
+                color: #7b1fa2;
+                border: 2px solid #7b1fa2;
+                border-radius: 5px;
+                font-weight: 600;
+                font-size: 10pt;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #e1bee7;
+            }
+            QPushButton:pressed {
+                background-color: #ce93d8;
+            }
+            QPushButton:checked {
+                background-color: #7b1fa2;
+                color: white;
+                border: 2px solid #5d1481;
+            }
+            
+            /* DISABLED STATE - Very clear visual difference */
+            QPushButton:disabled {
+                background-color: #f5f5f5;
+                color: #bdbdbd;
+                border: 2px dashed #e0e0e0;
+                font-weight: normal;
+            }
+            QPushButton:checked:disabled {
+                background-color: #cfd8dc;
+                color: #78909c;
+                border: 2px dashed #b0bec5;
+            }
+        """)
+        self.btn_track_p.setCheckable(True)
+        self.btn_track_p.clicked.connect(lambda: self._open_track_folder('p'))
+
 
         tb.addWidget(self.btn_track_f)
         tb.addWidget(self.btn_track_p)
 
         tb.addSeparator()
 
+        # Track selector with clear disabled state
+        selector_label = QLabel("Select Track:")
+        selector_label.setStyleSheet("""
+            QLabel {
+                color: #546e7a;
+                font-weight: 500;
+                font-size: 10pt;
+                padding-right: 8px;
+            }
+            QLabel:disabled {
+                color: #bdbdbd;
+            }
+        """)
+        tb.addWidget(selector_label)
+
         self.track_combo = QComboBox()
+        self.track_combo.setFixedSize(120, 34)
+        self.track_combo.setStyleSheet("""
+            /* ENABLED STATE */
+            QComboBox {
+                background-color: white;
+                border: 2px solid #607d8b;
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-weight: 500;
+                font-size: 10pt;
+                color: #37474f;
+                min-width: 80px;
+            }
+            QComboBox:hover {
+                border-color: #455a64;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+            }
+            QComboBox::down-arrow {
+                width: 12px;
+                height: 12px;
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                border: 2px solid #607d8b;
+                border-radius: 4px;
+                background-color: white;
+                selection-background-color: #e3f2fd;
+                selection-color: #1565c0;
+            }
+            
+            /* DISABLED STATE - Very clear visual difference */
+            QComboBox:disabled {
+                background-color: #f5f5f5;
+                color: #bdbdbd;
+                border: 2px dashed #e0e0e0;
+            }
+            QComboBox:disabled::down-arrow {
+                opacity: 0.5;
+            }
+        """)
         self.track_combo.addItems(["Track1", "Track2", "Track3"])
         self.track_combo.currentIndexChanged.connect(self._on_track_changed)
         tb.addWidget(self.track_combo)
+
+        # Add flexible spacer
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+
+        # Current selection indicator with disabled state
+        selection_frame = QFrame()
+        selection_frame.setStyleSheet("""
+            /* ENABLED STATE */
+            QFrame {
+                background-color: #f5f5f5;
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+                padding: 4px 12px;
+            }
+            QFrame:disabled {
+                background-color: #fafafa;
+                border: 1px dashed #e0e0e0;
+            }
+        """)
+        selection_layout = QHBoxLayout(selection_frame)
+        selection_layout.setContentsMargins(8, 4, 8, 4)
+        selection_layout.setSpacing(6)
+        
+        current_label = QLabel("Active:")
+        current_label.setStyleSheet("""
+            QLabel {
+                color: #546e7a;
+                font-weight: 500;
+            }
+            QLabel:disabled {
+                color: #bdbdbd;
+            }
+        """)
+        selection_layout.addWidget(current_label)
+        
+        self.current_track_label = QLabel()
+
+        self.current_track_label.setStyleSheet("""
+            QLabel {
+                color: #d32f2f;
+                font-weight: 600;
+            }
+            QLabel:disabled {
+                color: #ef9a9a;
+                font-weight: normal;
+            }
+        """)
+        selection_layout.addWidget(self.current_track_label)
+        
+        tb.addWidget(selection_frame)
+
     def _set_station(self, station: Station):
         self.state.station = station
+        self._update_active_track_ui()
         self._update_station_ui()
+        self._apply_run_state()
+        self._sync_station_actions()
+
+    def _select_station(self, station: Station):
+        # Map station choice to a default track (Top→1, Bottom→2, Feed→keep current)
+        if station == Station.TOP:
+            desired_track = 1
+        elif station == Station.BOTTOM:
+            desired_track = 2
+        else:
+            desired_track = max(1, self.state.track)
+
+        # Sync track combo without firing signals
+        if hasattr(self, "track_combo"):
+            self.track_combo.blockSignals(True)
+            self.track_combo.setCurrentIndex(desired_track - 1)
+            self.track_combo.blockSignals(False)
+
+        # Apply track-related UI updates
+        self._on_track_changed(desired_track - 1)
+
+        # Apply station change
+        self._set_station(station)
+
+    def _sync_station_actions(self):
+        if hasattr(self, "act_station_feed"):
+            self.act_station_feed.setChecked(self.state.station == Station.FEED)
+            self.act_station_top.setChecked(self.state.station == Station.TOP)
+            self.act_station_bottom.setChecked(self.state.station == Station.BOTTOM)
+
+    
+
+    def _on_track_changed(self, index: int):
+        self.state.track = index + 1
+
+        # 🔁 Update button labels to match track
+        track_no = self.state.track
+        self.btn_track_f.setText(f"Track{track_no}-F")
+        self.btn_track_p.setText(f"Track{track_no}-P")
+
+        # ❌ Do NOT change station here
+        # Station will be resolved later from inspection parameters
+
+        self._update_active_track_ui()
         self._apply_run_state()
 
 
-
-    def _on_track_changed(self, index: int):
-        # index 0 -> Track1, 1 -> Track2, etc.
-        self.state.track = index + 1
-        print(f"Active Track: Track{self.state.track}")
-
-        # Reset station to FEED on track change
-        self.state.station = Station.FEED
-
-    # =================================================
+       # =================================================
     # CENTER LAYOUT
     # =================================================
     def _build_center_layout(self):
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(1)
+        splitter.setStyleSheet("""
+            QSplitter::handle {
+                background: #E0E0E0;
+            }
+            QSplitter::handle:hover {
+                background: #B0B0B0;
+            }
+        """)
 
+        # LEFT PANEL (60%) ========================================
         left = QWidget()
         lyt = QVBoxLayout(left)
-        lyt.addWidget(QLabel("Track1"))
+        lyt.setContentsMargins(16, 16, 16, 16)
+        lyt.setSpacing(12)
 
+        # Track label with styling
+        self.track_label = QLabel()
+        self.track_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                color: #333333;
+                padding: 4px 0px;
+            }
+        """)
+        lyt.addWidget(self.track_label)
+
+
+        # Image display area with responsive sizing
         self.image_label = QLabel()
-        self.image_label.setMinimumSize(800, 520)
-        self.image_label.setStyleSheet("background:black; border:1px solid #555;")
+        self.image_label.setMinimumSize(400, 300)  # Reduced minimum for smaller screens
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.image_label.setStyleSheet("""
+            QLabel {
+                background: #000000;
+                border: 2px solid #CCCCCC;
+                border-radius: 4px;
+                min-height: 300px;
+            }
+        """)
         self.image_label.setAlignment(Qt.AlignCenter)
-        lyt.addWidget(self.image_label, 1)
-        # ---- Binary Threshold Slider + Value ----
+        # Show threshold slider when image area is clicked
+        self.image_label.mousePressEvent = self._on_image_clicked
+        lyt.addWidget(self.image_label, 1)  # Takes available space
+
+        # Binary Threshold Section
+        threshold_container = QWidget()
+        threshold_container.setVisible(False)  # Hidden by default
+        self.threshold_container = threshold_container  # Store reference for toggling
+        
+        threshold_layout = QVBoxLayout(threshold_container)
+        threshold_layout.setContentsMargins(0, 8, 0, 0)
+        
+        # Threshold label
+        threshold_header = QLabel("Binary Threshold Settings")
+        threshold_header.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                font-weight: bold;
+                color: #555555;
+                padding-bottom: 4px;
+            }
+        """)
+        threshold_layout.addWidget(threshold_header)
+        
+        # Slider row with improved layout
         slider_row = QHBoxLayout()
-        self.binary_text_label=QLabel("Threshold:")
-        self.binary_text_label.setVisible(False)
+        slider_row.setContentsMargins(0, 0, 0, 0)
+        slider_row.setSpacing(8)
+        
+        self.binary_text_label = QLabel("Threshold:")
+        self.binary_text_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                color: #666666;
+                min-width: 70px;
+            }
+        """)
+        
         self.binary_slider = QSlider(Qt.Horizontal)
         self.binary_slider.setRange(0, 255)
         self.binary_slider.setValue(self.binary_threshold)
-        self.binary_slider.setVisible(False)  # hidden by default
+        self.binary_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.binary_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #E0E0E0;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #4A90E2;
+                border-radius: 3px;
+            }
+            QSlider::add-page:horizontal {
+                background: #E0E0E0;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #4A90E2;
+                width: 18px;
+                margin: -6px 0;
+                border-radius: 9px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #3A7BC8;
+                width: 20px;
+            }
+        """)
         self.binary_slider.valueChanged.connect(self._on_binary_threshold_changed)
-
+        
         self.binary_value_label = QLabel(str(self.binary_threshold))
-        self.binary_value_label.setFixedWidth(40)
+        self.binary_value_label.setFixedWidth(50)
         self.binary_value_label.setAlignment(Qt.AlignCenter)
-        self.binary_value_label.setVisible(False)
-        self.binary_slider.valueChanged.connect(self._on_binary_threshold_changed)
-        self.binary_text_label = QLabel("Threshold:")
-        self.binary_text_label.setVisible(False)
+        self.binary_value_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                font-weight: bold;
+                color: #4A90E2;
+                background: #F0F4F8;
+                border: 1px solid #D0D7E2;
+                border-radius: 3px;
+                padding: 3px;
+            }
+        """)
+        
         slider_row.addWidget(self.binary_text_label)
-
-        slider_row.addWidget(self.binary_slider, 1)
+        slider_row.addWidget(self.binary_slider)
         slider_row.addWidget(self.binary_value_label)
         
+        threshold_layout.addLayout(slider_row)
+        lyt.addWidget(threshold_container)
 
-        lyt.addLayout(slider_row)
-
-
-        lyt.addWidget(self.binary_slider)
-
-
+        # Logo section with improved styling
+        logo_container = QWidget()
+        logo_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        logo_container.setStyleSheet("""
+            QWidget {
+                background: #2C3E50;
+                border-radius: 6px;
+                min-height: 80px;
+            }
+        """)
+        logo_layout = QVBoxLayout(logo_container)
+        logo_layout.setContentsMargins(16, 16, 16, 16)
+        
         logo = QLabel("LOGO")
         logo.setAlignment(Qt.AlignCenter)
-        logo.setStyleSheet("background:#111; color:white; font-size:18px;")
-        logo.setFixedHeight(120)
-        lyt.addWidget(logo)
+        logo.setStyleSheet("""
+            QLabel {
+                color: #ECF0F1;
+                font-size: 18px;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }
+        """)
+        logo.setFixedHeight(60)
+        logo_layout.addWidget(logo)
+        
+        lyt.addWidget(logo_container)
 
         splitter.addWidget(left)
 
+        # RIGHT PANEL (40%) ========================================
         right = QWidget()
+        right.setStyleSheet("""
+            QWidget {
+                background: #F8F9FA;
+            }
+        """)
         rlyt = QVBoxLayout(right)
+        rlyt.setContentsMargins(12, 12, 12, 12)
+        rlyt.setSpacing(12)
 
-        top_tbl = QTableWidget(10, 2)
-        top_tbl.setHorizontalHeaderLabels(["??", "Track1"])
-        rlyt.addWidget(top_tbl)
+        # Top table with styling and responsive sizing
+        self.top_tbl = QTableWidget(10, 2)
+        self.top_tbl.setHorizontalHeaderLabels(["Parameter", "Track 1"])
+        self.top_tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.top_tbl.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                border: 1px solid #DEE2E6;
+                border-radius: 4px;
+                gridline-color: #E9ECEF;
+                font-size: 11px;
+                alternate-background-color: #F8F9FA;
+            }
+            QHeaderView::section {
+                background: #4A90E2;
+                color: white;
+                font-weight: bold;
+                padding: 6px;
+                border: none;
+                font-size: 11px;
+            }
+            QTableWidget::item {
+                padding: 6px;
+                border-bottom: 1px solid #E9ECEF;
+            }
+            QTableWidget::item:selected {
+                background: #E3F2FD;
+            }
+        """)
+        self.top_tbl.horizontalHeader().setStretchLastSection(True)
+        self.top_tbl.verticalHeader().setVisible(False)
+        self.top_tbl.setAlternatingRowColors(True)
+        rlyt.addWidget(self.top_tbl, 1)  # Takes half of available space
 
-        bot_tbl = QTableWidget(15, 3)
-        bot_tbl.setHorizontalHeaderLabels(["??", "Track1 Qty", "Track1 %"])
-        rlyt.addWidget(bot_tbl)
+        # Bottom table with styling and responsive sizing
+        self.bot_tbl = QTableWidget(15, 3)
+        self.bot_tbl.setHorizontalHeaderLabels(["Parameter", "Track 1 Qty", "Track 1 %"])
+        self.bot_tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.bot_tbl.setStyleSheet("""
+            QTableWidget {
+                background: white;
+                border: 1px solid #DEE2E6;
+                border-radius: 4px;
+                gridline-color: #E9ECEF;
+                font-size: 11px;
+                alternate-background-color: #F8F9FA;
+            }
+            QHeaderView::section {
+                background: #5CB85C;
+                color: white;
+                font-weight: bold;
+                padding: 6px;
+                border: none;
+                font-size: 11px;
+            }
+            QTableWidget::item {
+                padding: 6px;
+                border-bottom: 1px solid #E9ECEF;
+            }
+            QTableWidget::item:selected {
+                background: #E3F2FD;
+            }
+        """)
+        self.bot_tbl.horizontalHeader().setStretchLastSection(True)
+        self.bot_tbl.verticalHeader().setVisible(False)
+        self.bot_tbl.setAlternatingRowColors(True)
+        rlyt.addWidget(self.bot_tbl, 1)  # Takes half of available space
 
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
         
+        # Set initial sizes for 60/40 split
+        splitter.setSizes([600, 400])  # Will be adjusted based on window size
+        
+        # Ensure proper proportions when resizing
+        def update_splitter_sizes():
+            total_width = splitter.width()
+            left_width = int(total_width * 0.6)
+            right_width = total_width - left_width
+            splitter.setSizes([left_width, right_width])
+        
+        # Connect resize event
+        splitter.splitterMoved.connect(lambda: update_splitter_sizes())
+        
+        # Set initial stretch factors for 60/40 ratio
+        splitter.setStretchFactor(0, 6)  # Left gets 60% weight
+        splitter.setStretchFactor(1, 4)  # Right gets 40% weight
 
         self.setCentralWidget(splitter)
+        
+        # Schedule initial layout update after window is shown
+        QTimer.singleShot(100, update_splitter_sizes)
 
     # =================================================
     # RUN STATE
@@ -429,11 +1289,11 @@ class MainWindow(QMainWindow):
         online = self.state.run_state == RunState.ONLINE
 
         camera_allowed = (
-            online
-            and not self.is_simulator_mode
-            and self.state.track == 1
-            and self.state.station == Station.FEED
-        )
+    online
+    and not self.is_simulator_mode
+    and self._is_camera_supported()
+)
+
 
         self.act_grab.setEnabled(camera_allowed)
         self.act_live.setEnabled(camera_allowed)
@@ -451,6 +1311,13 @@ class MainWindow(QMainWindow):
             self.act_online_offline.setChecked(offline)
             self.act_online_offline.blockSignals(False)
         self.setWindowTitle(f"iTrue - ChipCap Simulator [{self.state.run_state.value}]")
+    def _is_camera_supported(self) -> bool:
+        """
+        Defines whether camera/LIVE/GRAB is allowed
+        based on current UI state.
+        """
+        # Simulator rule: camera allowed for all tracks & stations
+        return True
 
     # =================================================
     # REAL DIALOGS
@@ -458,11 +1325,7 @@ class MainWindow(QMainWindow):
     def _open_inspection_parameters_range(self):
         dlg = InspectionParametersRangeDialog(self)
         if dlg.exec():
-            ip = self.inspection_parameters
-            print("Inspection Parameters:")
-            print("Body Length:", ip.body_length_min, ip.body_length_max)
-            print("Body Width :", ip.body_width_min, ip.body_width_max)
-            print("Terminal Width:", ip.terminal_width_min, ip.terminal_width_max)
+           pass
 
     def _open_lot_dialog(self):
         dlg = LotInformationDialog(self)
@@ -509,6 +1372,9 @@ class MainWindow(QMainWindow):
         self.binary_slider.setVisible(checked)
         self.binary_text_label.setVisible(checked)
         self.binary_value_label.setVisible(checked)
+        # Ensure the threshold container visibility matches mode
+        if hasattr(self, "threshold_container"):
+            self.threshold_container.setVisible(checked)
 
 
         if self.current_image is None:
@@ -621,6 +1487,24 @@ class MainWindow(QMainWindow):
         if self.binary_mode:
             self._apply_binary()
 
+    def _on_image_clicked(self, event):
+        """On image click, show binary slider if binary mode is active."""
+        if self.current_image is None:
+            return
+
+        # Only show threshold UI if binary mode is already enabled from menu
+        if self.binary_mode:
+            if hasattr(self, "threshold_container"):
+                self.threshold_container.setVisible(True)
+
+            self.binary_slider.setEnabled(True)
+            self.binary_slider.setVisible(True)
+            self.binary_text_label.setVisible(True)
+            self.binary_value_label.setVisible(True)
+
+            # Apply binary preview with current threshold
+            self._apply_binary()
+
   
 
 
@@ -646,12 +1530,43 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 🔀 Dispatch teach logic by station
+        params = self.current_params()
+        flags = self.shared_flags
+
+        # Drive teach path from explicit station selection
         if self.state.station == Station.FEED:
+            if not flags.get("enable_package_location", False):
+                QMessageBox.warning(
+                    self,
+                    "Teach",
+                    "Package Location Inspection must be enabled before Feed Teach."
+                )
+                return
+            if not flags.get("enable_pocket_location", False):
+                QMessageBox.warning(
+                    self,
+                    "Teach",
+                    "Pocket Location Inspection must be enabled before Feed Teach."
+                )
+                return
             self._teach_feed_station()
-        else:
-            # TOP & BOTTOM → same logic
-            self._teach_top_bottom_station()
+            return
+
+        # TOP/BOTTOM path (package teach)
+        if not flags.get("enable_package_location", False):
+            QMessageBox.warning(
+                self,
+                "Teach",
+                "Package Location Inspection must be enabled before Teach."
+            )
+            return
+
+        self._teach_top_bottom_station()
+
+
+   
+
+
     def _teach_feed_station(self):
         reply = QMessageBox.question(
             self,
@@ -667,20 +1582,11 @@ class MainWindow(QMainWindow):
     def _teach_top_bottom_station(self):
         self.is_teach_mode = True
 
-        QMessageBox.information(
-            self,
-            "Teach Device Position",
-            "Adjust rectangle to teach device position for rotation.\n"
-            "Press Enter or click NEXT to continue."
-        )
+        # PDF: Start by asking if image is rotated
+        self.teach_phase = TeachPhase.ROTATION_ASK
+        self._ask_image_rotation()
 
-        # STEP 5 → Device rotation ROI
-        self.teach_phase = TeachPhase.ROTATION_ROI
 
-        self.teach_overlay = PocketTeachOverlay(self.image_label, self)
-        self.teach_overlay.setGeometry(self.image_label.rect())
-        self.teach_overlay.show()
-        self.teach_overlay.setFocus()
 
     def _start_pocket_teach(self):
         self.is_teach_mode = True
@@ -704,12 +1610,16 @@ class MainWindow(QMainWindow):
         Green box = pocket position learned
         """
 
-        # Save pocket location
-        self.inspection_parameters.pocket_x = roi.x
-        self.inspection_parameters.pocket_y = roi.y
-        self.inspection_parameters.pocket_w = roi.w
-        self.inspection_parameters.pocket_h = roi.h
-        self.inspection_parameters.is_defined = True
+        # Save pocket location to station-specific parameters
+        params = self.current_params()
+        params.pocket_x = roi.x
+        params.pocket_y = roi.y
+        params.pocket_w = roi.w
+        params.pocket_h = roi.h
+        params.is_defined = True
+
+        # Save teach data to file
+        save_teach_data(self.inspection_parameters_by_station)
 
         # 🔁 Switch overlay to GREEN (important)
         self.teach_overlay.set_confirmed(True)
@@ -721,6 +1631,12 @@ class MainWindow(QMainWindow):
             "Pocket Teach",
             "Pocket position learned.\n(Green Box Confirmed)\n\nClick NEXT to continue."
         )
+        
+        # Remove overlay after confirmation
+        if self.teach_overlay:
+            self.teach_overlay.hide()
+            self.teach_overlay.deleteLater()
+            self.teach_overlay = None
 
     def _ask_image_rotation(self):
         """
@@ -728,8 +1644,12 @@ class MainWindow(QMainWindow):
         Ask user if image is rotated
         """
 
-        if self.teach_phase != TeachPhase.POCKET_DONE:
+        if self.teach_phase not in (
+            TeachPhase.POCKET_DONE,
+            TeachPhase.ROTATION_ASK
+        ):
             return
+
 
         reply = QMessageBox.question(
             self,
@@ -740,7 +1660,9 @@ class MainWindow(QMainWindow):
 
         # ---- NO ROTATION ----
         if reply == QMessageBox.No:
-            self.inspection_parameters.rotation_angle = 0.0
+            params = self.current_params()
+            params.rotation_angle = 0.0
+
 
             QMessageBox.information(
                 self,
@@ -758,7 +1680,9 @@ class MainWindow(QMainWindow):
         )
 
         if dlg.exec():
-            self.inspection_parameters.rotation_angle = dlg.angle
+            params = self.current_params()
+            params.rotation_angle = dlg.angle
+
 
             QMessageBox.information(
                 self,
@@ -857,10 +1781,18 @@ class MainWindow(QMainWindow):
 
         if reply == QMessageBox.Yes:
             # Save package ROI
-            self.inspection_parameters.package_x = roi.x
-            self.inspection_parameters.package_y = roi.y
-            self.inspection_parameters.package_w = roi.w
-            self.inspection_parameters.package_h = roi.h
+            params = self.current_params()
+
+            x, y, w, h = self._map_label_roi_to_image(roi)
+
+            params.package_x = x
+            params.package_y = y
+            params.package_w = w
+            params.package_h = h
+            params.is_defined = True
+
+
+
 
             self.teach_phase = TeachPhase.DONE
 
@@ -874,7 +1806,7 @@ class MainWindow(QMainWindow):
         else:
             # Retry package teach
             self._start_package_roi()
-
+        save_teach_data(self.inspection_parameters_by_station)
     def _exit_teach_mode(self):
         if not self.is_teach_mode:
             return
@@ -907,15 +1839,6 @@ class MainWindow(QMainWindow):
             self.btn_track_p.setStyleSheet(
                 "background:#3498db; color:white; font-weight:bold;"
             )
-
-    def _on_track_changed(self, index: int):
-        self.state.track = index + 1
-        print(f"Active Track: Track{self.state.track}")
-
-        # iTrue behavior: reset to FEED
-        self.state.station = Station.FEED
-        self._update_station_ui()
-        self._apply_run_state()
     def _on_next(self):
         if not self.is_teach_mode:
             return
@@ -1001,8 +1924,258 @@ class MainWindow(QMainWindow):
         self._display_pixmap(pix)
 
 
+    def _update_active_track_ui(self):
+        # Update "Active:" label in Track Control bar
+        if hasattr(self, "current_track_label"):
+            self.current_track_label.setText(f"Track{self.state.track}")
+
+        # Update main image panel title
+        if hasattr(self, "track_label"):
+            self.track_label.setText(f"Track {self.state.track}")
+        
+        # Update table headers to reflect active track
+        if hasattr(self, "top_tbl"):
+            self.top_tbl.setHorizontalHeaderLabels(["Parameter", f"Track {self.state.track}"])
+        
+        if hasattr(self, "bot_tbl"):
+            self.bot_tbl.setHorizontalHeaderLabels(["Parameter", f"Track {self.state.track} Qty", f"Track {self.state.track} %"])
+    def current_params(self) -> InspectionParameters:
+        if self.state.station not in self.inspection_parameters_by_station:
+            raise RuntimeError(
+                f"Invalid station state: {self.state.station}"
+            )
+        params = self.inspection_parameters_by_station[self.state.station]
+        # Always use shared flags for inspection item selection
+        params.flags = self.shared_flags
+        return params
+
+    
+
+  
+
+    def _map_label_roi_to_image(self, roi):
+        """
+        Convert ROI from QLabel (view) coordinates
+        to actual image pixel coordinates
+        """
+        if self.current_image is None:
+            return roi
+
+        img_h, img_w = self.current_image.shape[:2]
+
+        label_w = self.image_label.width()
+        label_h = self.image_label.height()
+
+        # Scale factors
+        sx = img_w / label_w
+        sy = img_h / label_h
+
+        return (
+            int(roi.x * sx),
+            int(roi.y * sy),
+            int(roi.w * sx),
+            int(roi.h * sy),
+        )
+    def on_inspection_parameters_changed(self):
+        # Station is now explicitly selected via the Station menu
+        # No need to auto-detect from flags anymore
+        # Just update the UI without changing the station
+        self._update_station_ui()
+        self._update_active_track_ui()
+    def _resolve_top_bottom_station(self) -> Station:
+        # Old iTrue behavior:
+        # Track1 → TOP
+        # Track2 → BOTTOM
+        # (Extendable if needed)
+
+        if self.state.track == 1:
+            return Station.TOP
+        else:
+            return Station.BOTTOM
+    def _toggle_step_mode(self, checked: bool):
+        """Toggle step mode on/off."""
+        self.step_mode_enabled = checked
+        status = "ENABLED" if checked else "DISABLED"
+        print(f"[STEP MODE] {status}")
+
+    def _on_test(self):
+        if self.current_image is None:
+            QMessageBox.warning(self, "Test", "No image loaded.")
+            return
+
+        if self.state.run_state != RunState.OFFLINE:
+            QMessageBox.warning(self, "Test", "Switch to OFFLINE mode.")
+            return
+
+        # Use the explicitly selected station
+        station = self.state.station
+
+        # TOP and BOTTOM stations use the same teach data
+        test_station = station
+        if station == Station.BOTTOM:
+            test_station = Station.TOP
+
+        # Get station-specific parameters with shared flags
+        params = self.inspection_parameters_by_station[test_station]
+
+        print(f"\n[TEST] Station: {station}")
+        if station == Station.BOTTOM:
+            print(f"[TEST] Using TOP station teach data for BOTTOM station")
+        print(f"[TEST] Shared Inspection Flags: {self.shared_flags}")
+        print(f"[TEST] Station Teach Data: package=({params.package_x}, {params.package_y}, {params.package_w}, {params.package_h})")
+
+        # Run test based on station
+        if station == Station.FEED:
+            # FEED station test
+            if self.step_mode_enabled:
+                print(f"[TEST] Step Mode ENABLED - running step-by-step inspection")
+                result = test_feed(
+                    image=self.current_image.copy(),
+                    params=params,
+                    step_mode=True,
+                    step_callback=self._handle_test_step
+                )
+            else:
+                result = test_feed(
+                    image=self.current_image.copy(),
+                    params=params
+                )
+        else:
+            # TOP/BOTTOM test with optional step mode
+            if self.step_mode_enabled:
+                print(f"[TEST] Step Mode ENABLED - running step-by-step inspection")
+                result = test_top_bottom(
+                    image=self.current_image.copy(),
+                    params=params,
+                    step_mode=True,
+                    step_callback=self._handle_test_step
+                )
+            else:
+                result = test_top_bottom(
+                    image=self.current_image.copy(),
+                    params=params
+                )
+
+        if result.result_image is not None:
+            self._show_image(result.result_image)
+
+        # Display detailed reason in dialog box
+        title = f"Test Result: {result.status}"
+        QMessageBox.information(self, title, result.message)
+
+        print(f"[TEST RESULT] {result.status} - {result.message}")
+
+        # Save result image to track-specific folder (pass/fail)
+        try:
+            self._save_result_image(result)
+        except Exception as e:
+            print(f"[WARN] Failed to save result image: {e}")
+
+    def _save_result_image(self, result: TestResult):
+        """Save the current/result image to 'New folder/Track{N}p' or 'Track{N}f'."""
+        # Decide pass/fail suffix
+        suffix = 'p' if result.status == TestStatus.PASS else 'f'
+
+        # Base folder 'New folder' at workspace root
+        base_dir = Path("New folder")
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        # Track-specific folder
+        track_dir = base_dir / f"Track{self.state.track}{suffix}"
+        track_dir.mkdir(parents=True, exist_ok=True)
+
+        # Choose image: prefer overlay/result_image, else raw current image
+        img = result.result_image if hasattr(result, 'result_image') and result.result_image is not None else self.current_image
+        if img is None:
+            print("[WARN] No image to save")
+            return
+
+        # Build filename with timestamp
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_path = track_dir / f"{ts}.png"
+
+        # Save using OpenCV
+        ok = cv2.imwrite(str(out_path), img)
+        if ok:
+            print(f"[INFO] Saved image: {out_path}")
+        else:
+            print(f"[WARN] cv2.imwrite failed: {out_path}")
+
+    def _open_track_folder(self, kind: str):
+        """Open the Track folder for current track. kind: 'p' or 'f'."""
+        base_dir = Path("New folder")
+        track_dir = base_dir / f"Track{self.state.track}{kind}"
+        try:
+            track_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(track_dir)))
+
+    def _handle_test_step(self, step_data: dict) -> bool:
+        """
+        Handle a single step in step-by-step test mode.
+        
+        Args:
+            step_data: Dict with keys:
+                - step_name: Name of the inspection (e.g., "Body Length")
+                - status: "PASS" or "FAIL"
+                - measured: Measured value
+                - expected: Expected range
+                - debug_info: Extra debug information
+        
+        Returns:
+            True to continue to next step, False to abort
+        """
+        dlg = StepDebugDialog(self)
+        dlg.set_result(
+            step_name=step_data.get("step_name", "Unknown"),
+            status=step_data.get("status", "?"),
+            measured=step_data.get("measured", ""),
+            expected=step_data.get("expected", ""),
+            debug_info=step_data.get("debug_info", "")
+        )
+
+        result = dlg.exec()
+
+        if dlg.edit_params_clicked:
+            # Open Device Inspection dialog for parameter editing
+            print("[STEP] User requested parameter edit")
+            self._open_device_inspection_dialog()
+            return False  # Abort current test, user will adjust and re-test
+
+        if result == QDialog.Accepted and dlg.next_clicked:
+            print("[STEP] Proceeding to next step")
+            return True
+
+        print("[STEP] Test aborted by user")
+        return False
+
+
     # =================================================
     # STUB
     # =================================================
     def _stub(self, name: str):
         QMessageBox.information(self, name, f"{name}\n\n(Not implemented yet)")
+
+    def _save_current_image(self):
+        """Save the currently loaded image to 'New folder/ManualSaved'."""
+        if self.current_image is None:
+            QMessageBox.warning(self, "Save Image", "No image loaded.")
+            return
+
+        base_dir = Path("New folder")
+        target_dir = base_dir / "ManualSaved"
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, "Save Image", f"Failed to create folder: {e}")
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_path = target_dir / f"manual_{ts}.png"
+
+        ok = cv2.imwrite(str(out_path), self.current_image)
+        if ok:
+            QMessageBox.information(self, "Save Image", f"Saved to:\n{out_path}")
+        else:
+            QMessageBox.warning(self, "Save Image", "Failed to save image.")

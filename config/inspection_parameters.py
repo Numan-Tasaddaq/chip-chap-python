@@ -143,3 +143,21 @@ class InspectionParameters:
     pocket_contrast: int = 75
 
 
+    # ==================================================
+    # ---- TEACH RESULTS (Station-specific geometry) ----
+    # ==================================================
+
+    # Rotation (used by TOP / BOTTOM and FEED)
+    rotation_angle: float = 0.0
+
+    # Package Location ROI (all stations)
+    package_x: int = 0
+    package_y: int = 0
+    package_w: int = 0
+    package_h: int = 0
+
+    # Pocket Location ROI (FEED station only)
+    pocket_x: int = 0
+    pocket_y: int = 0
+    pocket_w: int = 0
+    pocket_h: int = 0
