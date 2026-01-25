@@ -14,7 +14,7 @@ def draw_measurement_result(image, roi, measurement_name, status, measured_value
     Draw measurement result on image with overlays.
     
     Args:
-        image: Input BGR image (will be modified)
+        image: Input BGR image (will be copied to avoid modifying original)
         roi: Package ROI (x, y, w, h)
         measurement_name: Name like "Body Length" or "Body Width"
         status: "PASS" or "FAIL"
@@ -32,8 +32,12 @@ def draw_measurement_result(image, roi, measurement_name, status, measured_value
             }
     
     Returns:
-        Modified image with overlays
+        New image with overlays (original image not modified)
     """
+    # CRITICAL: Create a copy to avoid modifying the original image
+    # This prevents visualization from affecting subsequent measurements
+    image = np.copy(image)
+    
     x, y, w, h = roi
     color = (0, 255, 0) if status == "PASS" else (0, 0, 255)  # Green or Red in BGR
     thickness = 2

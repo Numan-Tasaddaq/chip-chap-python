@@ -2,6 +2,179 @@ import cv2
 import numpy as np
 from sklearn.linear_model import RANSACRegressor
 
+def _binary_from_edge_contrast(gray, edge_contrast, debug=False):
+    """Build a binary image using two polarities and choose the one with reasonable fill."""
+    _, binary_inv = cv2.threshold(gray, int(edge_contrast), 255, cv2.THRESH_BINARY_INV)
+    _, binary_norm = cv2.threshold(gray, int(edge_contrast), 255, cv2.THRESH_BINARY)
+
+    white_inv = (np.sum(binary_inv == 255) / binary_inv.size) * 100 if binary_inv.size else 0
+    white_norm = (np.sum(binary_norm == 255) / binary_norm.size) * 100 if binary_norm.size else 0
+
+    if debug:
+        print(f"[DEBUG] Binary fill%% inv={white_inv:.1f}, norm={white_norm:.1f}")
+
+    # Prefer a reasonable fill 10-70%; otherwise pick closer to 40%
+    if 10 < white_inv <= 70:
+        chosen = binary_inv
+    elif 10 < white_norm <= 70:
+        chosen = binary_norm
+    else:
+        chosen = binary_inv if abs(white_inv - 40) < abs(white_norm - 40) else binary_norm
+
+    # Clean a bit
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    chosen = cv2.morphologyEx(chosen, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return chosen
+
+def _measure_band_thickness_top_bottom(gray, edge_contrast=106, num_scans=60, debug=False):
+    """
+    Estimate thickness of top and bottom body bands between terminal inner edge and central body area.
+    Returns (top_thickness, bottom_thickness) in pixels, or (None, None) if failed.
+    """
+    h, w = gray.shape[:2]
+    if h == 0 or w == 0:
+        return None, None
+
+    binary = _binary_from_edge_contrast(gray, edge_contrast, debug)
+    sobel_y = cv2.Sobel(binary, cv2.CV_64F, 0, 1, ksize=3)
+
+    # Regions: top 35%, bottom 35%
+    top_h = int(h * 0.35)
+    bot_h = int(h * 0.35)
+    top_region = sobel_y[0:top_h, :]
+    bot_region = sobel_y[h - bot_h:h, :]
+
+    skip = max(1, w // max(10, num_scans))
+
+    def thickness_in_region(grad_region, offset_y, is_top=True):
+        vals = []
+        for col in range(0, grad_region.shape[1], skip):
+            col_data = grad_region[:, col]
+            # Find candidate edges by prominence
+            # For top: terminal inner edge tends to be a negative peak first, central body edge positive after
+            # For bottom: polarity can flip; try both orders and pick plausible distances
+            peaks_pos = np.argwhere(col_data > 5).flatten()
+            peaks_neg = np.argwhere(col_data < -5).flatten()
+            best = None
+            if is_top:
+                for n in peaks_neg:
+                    # find next positive after n
+                    p_after = peaks_pos[peaks_pos > n]
+                    if p_after.size:
+                        dist = int(p_after[0] - n)
+                        if 4 <= dist <= int(h * 0.5):
+                            best = dist
+                            break
+            else:
+                # bottom: try positive then negative after
+                for p in peaks_pos[::-1]:  # start from bottom side by reversing
+                    n_before = peaks_neg[peaks_neg < p]
+                    if n_before.size:
+                        dist = int(p - n_before[-1])
+                        if 4 <= dist <= int(h * 0.5):
+                            best = dist
+                            break
+                # fallback: try negative then positive
+                if best is None:
+                    for n in peaks_neg:
+                        p_after = peaks_pos[peaks_pos > n]
+                        if p_after.size:
+                            dist = int(p_after[0] - n)
+                            if 4 <= dist <= int(h * 0.5):
+                                best = dist
+                                break
+            if best is not None:
+                vals.append(best)
+        if not vals:
+            return None
+        # use median for robustness
+        return float(np.median(vals))
+
+    top_t = thickness_in_region(top_region, 0, is_top=True)
+    bot_t = thickness_in_region(bot_region, h - bot_h, is_top=False)
+    if debug:
+        print(f"[DEBUG] Band thickness top={top_t}, bottom={bot_t}")
+    return top_t, bot_t
+
+def measure_body_to_term_width(image, roi, edge_contrast=106, num_scans=60, debug=False):
+    """
+    Measure the thickness of the body bands adjacent to terminals (top and bottom).
+    Returns dict: { 'top': value(px) or None, 'bottom': value(px) or None }
+    """
+    # CRITICAL: Create independent copy to prevent memory corruption
+    image = np.copy(image)
+    
+    x, y, w, h = roi
+    crop = image[y:y+h, x:x+w].copy()
+    if crop.size == 0:
+        return {'top': None, 'bottom': None}
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    top_t, bot_t = _measure_band_thickness_top_bottom(gray, edge_contrast, num_scans, debug)
+    return {'top': top_t, 'bottom': bot_t}
+
+def measure_term_to_body_gap(image, roi, edge_contrast=106, num_scans=60, debug=False):
+    """
+    Measure the minimum gap between terminal inner edge and body area (top and bottom),
+    returning the worst-case (minimum) gap in pixels.
+    """
+    # CRITICAL: Create independent copy to prevent memory corruption
+    image = np.copy(image)
+    
+    x, y, w, h = roi
+    crop = image[y:y+h, x:x+w].copy()
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    binary = _binary_from_edge_contrast(gray, edge_contrast, debug)
+    sobel_y = cv2.Sobel(binary, cv2.CV_64F, 0, 1, ksize=3)
+
+    top_h = int(h * 0.35)
+    bot_h = int(h * 0.35)
+    top_region = sobel_y[0:top_h, :]
+    bot_region = sobel_y[h - bot_h:h, :]
+    skip = max(1, w // max(20, num_scans))
+
+    def min_gap_region(grad_region, is_top=True):
+        gaps = []
+        for col in range(0, grad_region.shape[1], skip):
+            col_data = grad_region[:, col]
+            peaks_pos = np.argwhere(col_data > 5).flatten()
+            peaks_neg = np.argwhere(col_data < -5).flatten()
+            # Try both polarities; take smaller plausible gap
+            best = None
+            # negative then positive
+            for n in peaks_neg:
+                p_after = peaks_pos[peaks_pos > n]
+                if p_after.size:
+                    dist = int(p_after[0] - n)
+                    if 2 <= dist <= int(h * 0.5):
+                        best = dist
+                        break
+            # positive then negative
+            if best is None:
+                for p in peaks_pos:
+                    n_after = peaks_neg[peaks_neg > p]
+                    if n_after.size:
+                        dist = int(n_after[0] - p)
+                        if 2 <= dist <= int(h * 0.5):
+                            best = dist
+                            break
+            if best is not None:
+                gaps.append(best)
+        if not gaps:
+            return None
+        return int(np.min(gaps))
+
+    g_top = min_gap_region(top_region, True)
+    g_bot = min_gap_region(bot_region, False)
+    if debug:
+        print(f"[DEBUG] Term-to-body gaps top={g_top}, bottom={g_bot}")
+    # return worst-case (minimum) across both
+    candidates = [g for g in [g_top, g_bot] if g is not None]
+    if not candidates:
+        return None
+    return int(min(candidates))
+
 def measure_body_width(image, roi, body_contrast=75, debug=False):
     """
     Measure body width using edge scanning method similar to old system.
@@ -20,8 +193,23 @@ def measure_body_width(image, roi, body_contrast=75, debug=False):
     
     if debug:
         print(f"[DEBUG] Body Width: ROI=({x}, {y}, {w}, {h})")
+        # Debug: Check input image integrity BEFORE copy
+        print(f"[DEBUG] Body Width: Image id={id(image)}, shape={image.shape}, dtype={image.dtype}")
+        full_roi_before = image[y:y+h, x:x+w]
+        full_roi_mean_before = cv2.mean(full_roi_before)[0]
+        print(f"[DEBUG] Body Width: Input ROI BGR mean (BEFORE copy)={full_roi_mean_before:.1f}")
     
-    crop = image[y:y+h, x:x+w]
+    # CRITICAL: Create independent copy to prevent any memory corruption from QImage or other sources
+    image = np.copy(image)
+    
+    if debug:
+        # Verify copy worked
+        print(f"[DEBUG] Body Width: Copied image id={id(image)}, shape={image.shape}")
+        full_roi_after = image[y:y+h, x:x+w]
+        full_roi_mean_after = cv2.mean(full_roi_after)[0]
+        print(f"[DEBUG] Body Width: Input ROI BGR mean (AFTER copy)={full_roi_mean_after:.1f}")
+    
+    crop = image[y:y+h, x:x+w].copy()
 
     if crop.size == 0:
         if debug:
@@ -32,7 +220,8 @@ def measure_body_width(image, roi, body_contrast=75, debug=False):
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     
     if debug:
-        print(f"[DEBUG] Body Width: Gray shape={gray.shape}, dtype={gray.dtype}")
+        gray_mean = np.mean(gray)
+        print(f"[DEBUG] Body Width: Gray shape={gray.shape}, dtype={gray.dtype}, mean={gray_mean:.1f}")
     
     # Define search regions: top 25% and bottom 25% of the package (matching old system)
     top_region_height = int(h * 0.25)
@@ -174,8 +363,11 @@ def measure_body_length(image, roi, body_contrast=75, debug=False):
     Returns:
         Body length in pixels (distance between left and right edges), or None if failed
     """
+    # CRITICAL: Create independent copy to prevent memory corruption
+    image = np.copy(image)
+    
     x, y, w, h = roi
-    crop = image[y:y+h, x:x+w]
+    crop = image[y:y+h, x:x+w].copy()
 
     if crop.size == 0:
         return None
@@ -414,6 +606,9 @@ def measure_terminal_width(image, roi, terminal_roi, edge_contrast=106, debug=Fa
     Returns:
         Terminal width in pixels, or None if failed
     """
+    # CRITICAL: Create independent copy to prevent memory corruption
+    image = np.copy(image)
+    
     x, y, w, h = roi
     tx, ty, tw, th = terminal_roi
     
@@ -494,6 +689,9 @@ def measure_terminal_length(image, roi, terminal_roi, edge_contrast=106, num_sca
     Returns:
         Terminal length in pixels (median of all scan measurements), or None if failed
     """
+    # CRITICAL: Create independent copy to prevent memory corruption
+    image = np.copy(image)
+    
     x, y, w, h = roi
     tx, ty, tw, th = terminal_roi
     
@@ -625,6 +823,9 @@ def measure_term_to_term_length(image, roi, left_terminal_roi, right_terminal_ro
     Returns:
         Terminal-to-terminal length in pixels (median gap), or None if failed
     """
+    # CRITICAL: Create independent copy to prevent memory corruption
+    image = np.copy(image)
+    
     x, y, w, h = roi
     ltx, lty, ltw, lth = left_terminal_roi
     rtx, rty, rtw, rth = right_terminal_roi
@@ -718,3 +919,119 @@ def measure_term_to_term_length(image, roi, left_terminal_roi, right_terminal_ro
         print(f"[DEBUG] Term-Term Length: Min={np.min(measurements)}, Max={np.max(measurements)}, Mean={np.mean(measurements):.1f}")
     
     return int(round(median_gap))
+
+
+def check_body_width_difference(top_body_width, bottom_body_width, tolerance, debug=False):
+    """
+    Check if top and bottom body widths differ by more than tolerance.
+    
+    FOR SPECIAL DEVICES: Used when device body might be asymmetric top-to-bottom.
+    Matches old ChipCap system (CCInsp.cpp lines 2116-2131).
+    
+    Args:
+        top_body_width: Body width measured at top edge (pixels)
+        bottom_body_width: Body width measured at bottom edge (pixels)
+        tolerance: Maximum allowable difference (pixels)
+        debug: If True, print debug information
+    
+    Returns:
+        dict with 'difference', 'is_pass', 'tolerance', 'top', 'bottom'
+    """
+    difference = abs(top_body_width - bottom_body_width)
+    
+    # Old system uses >= for fail condition (fails if difference >= tolerance)
+    is_pass = difference < tolerance
+    
+    if debug:
+        print(f"[DEBUG] Body Width Difference:")
+        print(f"  Top Width: {top_body_width:.2f} pixels")
+        print(f"  Bottom Width: {bottom_body_width:.2f} pixels")
+        print(f"  Difference: {difference:.2f} pixels")
+        print(f"  Tolerance: {tolerance:.2f} pixels")
+        print(f"  Result: {'PASS' if is_pass else 'FAIL'}")
+    
+    return {
+        'difference': difference,
+        'is_pass': is_pass,
+        'tolerance': tolerance,
+        'top': top_body_width,
+        'bottom': bottom_body_width
+    }
+
+
+def check_terminal_length_difference(left_terminal_lengths, right_terminal_lengths, 
+                                     tolerance, ignore_start=0, ignore_end=0, debug=False):
+    """
+    Check if any left/right terminal length pair differs by more than tolerance.
+    
+    Ensures left/right terminal symmetry across all measurements.
+    Matches old ChipCap system (CCInsp.cpp lines 4177-4203).
+    
+    Args:
+        left_terminal_lengths: List of left terminal measurements (pixels)
+        right_terminal_lengths: List of right terminal measurements (pixels)
+        tolerance: Maximum allowable difference (pixels)
+        ignore_start: Number of initial measurements to skip
+        ignore_end: Number of final measurements to skip
+        debug: If True, print debug information
+    
+    Returns:
+        dict with 'max_difference', 'is_pass', 'tolerance', 'failed_index', 
+        'worst_left', 'worst_right'
+    """
+    max_difference = 0.0
+    failed_index = -1
+    is_pass = True
+    worst_left = 0.0
+    worst_right = 0.0
+    
+    num_measurements = min(len(left_terminal_lengths), len(right_terminal_lengths))
+    
+    if debug:
+        print(f"[DEBUG] Terminal Length Difference Check:")
+        print(f"  Total measurements: {num_measurements}")
+        print(f"  Ignore start: {ignore_start}, Ignore end: {ignore_end}")
+        print(f"  Tolerance: {tolerance:.2f} pixels")
+    
+    for i in range(num_measurements):
+        # Skip ignored measurements
+        if i < ignore_start or i >= (num_measurements - ignore_end):
+            continue
+        
+        left_length = left_terminal_lengths[i]
+        right_length = right_terminal_lengths[i]
+        
+        # Skip invalid measurements (old system checks for -1000 or 0)
+        if left_length <= 0 or right_length <= 0:
+            continue
+        
+        difference = abs(left_length - right_length)
+        
+        if difference > max_difference:
+            max_difference = difference
+            worst_left = left_length
+            worst_right = right_length
+        
+        # Old system uses >= for fail condition (fails if difference >= tolerance)
+        if difference >= tolerance:
+            is_pass = False
+            failed_index = i
+            if debug:
+                print(f"  [FAIL] Measurement #{i}: Left={left_length:.2f}, Right={right_length:.2f}, Diff={difference:.2f}")
+            break
+    
+    if debug:
+        print(f"  Max difference: {max_difference:.2f} pixels")
+        print(f"  Worst pair: Left={worst_left:.2f}, Right={worst_right:.2f}")
+        print(f"  Result: {'PASS' if is_pass else 'FAIL'}")
+        if failed_index >= 0:
+            print(f"  Failed at measurement #{failed_index}")
+    
+    return {
+        'max_difference': max_difference,
+        'is_pass': is_pass,
+        'tolerance': tolerance,
+        'failed_index': failed_index,
+        'worst_left': worst_left,
+        'worst_right': worst_right
+    }

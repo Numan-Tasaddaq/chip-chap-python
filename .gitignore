@@ -62,3 +62,6 @@ env/
 # Project specific
 license.json
 *.log
+
+# Generated snapshots
+New folder/Track*/**/*.png

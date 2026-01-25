@@ -76,8 +76,8 @@ class GrabService:
         if not ret:
             return
 
-        self._display_frame(frame)
         self.main_window.current_image = frame
+        self._display_frame(frame)
 
     # =================================================
     # LIVE (continuous)
@@ -134,8 +134,8 @@ class GrabService:
         if not ret:
             return
 
-        self._display_frame(frame)
         self.main_window.current_image = frame
+        self._display_frame(frame)
 
     # =================================================
     # Display helper
@@ -145,13 +145,15 @@ class GrabService:
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
 
+        # Copy RGB data to prevent memory sharing
+        rgb_copy = rgb.copy()
         qimg = QImage(
-            rgb.data,
+            rgb_copy.data,
             w,
             h,
             bytes_per_line,
             QImage.Format_RGB888
-        )
+        ).copy()
 
         pix = QPixmap.fromImage(qimg)
         self.main_window._display_pixmap(pix)

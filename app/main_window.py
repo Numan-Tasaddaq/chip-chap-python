@@ -13,8 +13,9 @@ from PySide6.QtWidgets import (
     QTableWidget, QMessageBox, QSlider, QSizePolicy, QMenu, QFrame, QToolButton, QDialog
 )
 import cv2
+import numpy as np
 from PySide6.QtGui import QImage, QPixmap
-from fastapi import params
+
 # ✅ IMPORT REAL DIALOGS
 from ui.inspection_parameters_range_dialog import InspectionParametersRangeDialog
 from ui.lot_information_dialog import LotInformationDialog
@@ -85,7 +86,8 @@ class MainWindow(QMainWindow):
         self.state = AppState()
         self.teach_phase = TeachPhase.NONE
         self.is_simulator_mode=False
-        self.current_image=None
+        self.current_image=None  # Original loaded image (never modified)
+        self.displayed_image=None  # Currently displayed image (may be modified with overlays)
        
 
         # Shared inspection flags (one set for all stations)
@@ -1452,13 +1454,15 @@ class MainWindow(QMainWindow):
         )
 
         h, w = binary.shape
+        # Copy binary data to prevent memory sharing
+        binary_copy = binary.copy()
         qimg = QImage(
-            binary.data,
+            binary_copy.data,
             w,
             h,
             w,
             QImage.Format_Grayscale8
-        )
+        ).copy()
 
         pix = QPixmap.fromImage(qimg)
         self._display_pixmap(pix)
@@ -1470,13 +1474,15 @@ class MainWindow(QMainWindow):
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
 
+        # Copy RGB data to prevent memory sharing
+        rgb_copy = rgb.copy()
         qimg = QImage(
-            rgb.data,
+            rgb_copy.data,
             w,
             h,
             bytes_per_line,
             QImage.Format_RGB888
-        )
+        ).copy()
 
         pix = QPixmap.fromImage(qimg)
         self._display_pixmap(pix)
@@ -1914,12 +1920,23 @@ class MainWindow(QMainWindow):
         M = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
         rotated = cv2.warpAffine(self.current_image, M, (w, h))
 
+        # Preview only - don't save this as current_image
         self._show_image(rotated)
     def _show_image(self, image):
-        self.current_image = image
+        """Display an image (possibly with overlays) without overwriting the original."""
+        self.displayed_image = image
+        
+        # Debug: Verify current_image is not being modified
+        if self.current_image is not None:
+            mean_val = cv2.mean(self.current_image)[0]
+            print(f"[DEBUG] current_image mean: {mean_val:.1f}, displayed_image mean: {cv2.mean(image)[0]:.1f}")
+        
+        # IMPORTANT: Create a copy of the RGB data to prevent memory sharing with QImage
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
-        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        # Make a copy to ensure QImage doesn't share memory with our numpy array
+        rgb_copy = rgb.copy()
+        qimg = QImage(rgb_copy.data, w, h, ch * w, QImage.Format_RGB888).copy()
         pix = QPixmap.fromImage(qimg)
         self._display_pixmap(pix)
 
@@ -2018,6 +2035,14 @@ class MainWindow(QMainWindow):
         # Get station-specific parameters with shared flags
         params = self.inspection_parameters_by_station[test_station]
 
+        # Debug: Log image state before test
+        mean_before = cv2.mean(self.current_image)[0]
+        # Also check the ROI region that will be tested
+        x, y, w, h = params.package_x, params.package_y, params.package_w, params.package_h
+        roi_crop = self.current_image[y:y+h, x:x+w]
+        roi_mean = cv2.mean(roi_crop)[0]
+        print(f"[DEBUG] Before test - current_image mean: {mean_before:.1f}, ROI mean: {roi_mean:.1f}")
+
         print(f"\n[TEST] Station: {station}")
         if station == Station.BOTTOM:
             print(f"[TEST] Using TOP station teach data for BOTTOM station")
@@ -2029,35 +2054,61 @@ class MainWindow(QMainWindow):
             # FEED station test
             if self.step_mode_enabled:
                 print(f"[TEST] Step Mode ENABLED - running step-by-step inspection")
+                # Create explicit copy using numpy to prevent any reference sharing
+                test_image = np.array(self.current_image, copy=True, order='C')
+                print(f"[DEBUG] Test image copy - id={id(test_image)}")
                 result = test_feed(
-                    image=self.current_image.copy(),
+                    image=test_image,
                     params=params,
                     step_mode=True,
                     step_callback=self._handle_test_step
                 )
             else:
+                # Create explicit copy using numpy to prevent any reference sharing
+                test_image = np.array(self.current_image, copy=True, order='C')
+                print(f"[DEBUG] Test image copy - id={id(test_image)}")
                 result = test_feed(
-                    image=self.current_image.copy(),
+                    image=test_image,
                     params=params
                 )
         else:
             # TOP/BOTTOM test with optional step mode
             if self.step_mode_enabled:
                 print(f"[TEST] Step Mode ENABLED - running step-by-step inspection")
+                # Create explicit copy using numpy to prevent any reference sharing
+                # FORCE new memory allocation by using array constructor
+                test_image = np.array(self.current_image, copy=True, order='C')
+                # Verify the copy is independent
+                test_mean = cv2.mean(test_image)[0]
+                test_roi = test_image[y:y+h, x:x+w]
+                test_roi_mean = cv2.mean(test_roi)[0]
+                print(f"[DEBUG] Test image copy - mean: {test_mean:.1f}, ROI mean: {test_roi_mean:.1f}, id={id(test_image)}")
                 result = test_top_bottom(
-                    image=self.current_image.copy(),
+                    image=test_image,
                     params=params,
                     step_mode=True,
                     step_callback=self._handle_test_step
                 )
             else:
+                # Create explicit copy using numpy to prevent any reference sharing
+                # FORCE new memory allocation by using array constructor
+                test_image = np.array(self.current_image, copy=True, order='C')
+                # Verify the copy is independent
+                test_mean = cv2.mean(test_image)[0]
+                test_roi = test_image[y:y+h, x:x+w]
+                test_roi_mean = cv2.mean(test_roi)[0]
+                print(f"[DEBUG] Test image copy - mean: {test_mean:.1f}, ROI mean: {test_roi_mean:.1f}, id={id(test_image)}")
                 result = test_top_bottom(
-                    image=self.current_image.copy(),
+                    image=test_image,
                     params=params
                 )
 
         if result.result_image is not None:
             self._show_image(result.result_image)
+
+        # Debug: Verify current_image wasn't modified by test
+        mean_after = cv2.mean(self.current_image)[0]
+        print(f"[DEBUG] After test - current_image mean: {mean_after:.1f}")
 
         # Display detailed reason in dialog box
         title = f"Test Result: {result.status}"

@@ -43,20 +43,23 @@ class ImageLoader:
             return
 
         self.main_window.current_image = img
-        self._display_image(img)
+        self.main_window._show_image(img)
 
     def _display_image(self, frame):
+        # Note: This function is deprecated - use main_window._show_image() instead
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
 
+        # Copy RGB data to prevent memory sharing
+        rgb_copy = rgb.copy()
         qimg = QImage(
-            rgb.data,
+            rgb_copy.data,
             w,
             h,
             bytes_per_line,
             QImage.Format_RGB888
-        )
+        ).copy()
 
         pix = QPixmap.fromImage(qimg)
         self.main_window._display_pixmap(pix)
