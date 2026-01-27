@@ -26,7 +26,7 @@ def main() -> None:
         license_ok = ld is not None and verify_license(ld)
 
     if not license_ok:
-        dlg = LicenseDialog()
+        dlg = LicenseDialog() 
         if dlg.exec() == 0:  # user cancelled
             sys.exit(0)
 

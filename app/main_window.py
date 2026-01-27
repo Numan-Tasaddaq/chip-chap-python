@@ -55,6 +55,9 @@ class TeachPhase(Enum):
     PACKAGE_ASK = 5
     PACKAGE_ROI = 6
     PACKAGE_CONFIRM = 7
+    COLOR_ASK = 9
+    COLOR_BODY_ROI = 10
+    COLOR_TERMINAL_ROI = 11
     DONE = 8
 
 class Station(str, Enum):
@@ -1775,7 +1778,7 @@ class MainWindow(QMainWindow):
     def _confirm_package_teach(self, roi):
         """
         STEP 17 & 18
-        Confirm package location and complete teach
+        Confirm package location, then ask about color inspection teach
         """
 
         reply = QMessageBox.question(
@@ -1797,22 +1800,260 @@ class MainWindow(QMainWindow):
             params.package_h = h
             params.is_defined = True
 
+            save_teach_data(self.inspection_parameters_by_station)
 
+            # Ask about color inspection teach (same pattern as old code)
+            self._ask_color_inspection_teach()
+        else:
+            # Retry package teach
+            self._start_package_roi()
 
+    def _ask_color_inspection_teach(self):
+        """
+        Ask if user wants to teach color inspection (body and/or terminal color).
+        Same pattern as old C++ code: after package location confirmation.
+        """
+        params = self.current_params()
+        flags = params.flags
 
+        # Check if color inspection is enabled
+        check_body_color = flags.get("check_body_color", False)
+        check_terminal_color = flags.get("check_terminal_color", False)
+
+        if not (check_body_color or check_terminal_color):
+            # No color inspection enabled, skip to done
             self.teach_phase = TeachPhase.DONE
-
             QMessageBox.information(
                 self,
                 "Teach Complete",
                 "Teach process completed successfully.\nClick OK to finish."
             )
+            self._exit_teach_mode()
+            return
 
+        # If color inspection enabled, ask to teach colors
+        reply = QMessageBox.question(
+            self,
+            "Color Inspection Teach",
+            "Do you want to teach Color Inspection?\n\n(Body Color and/or Terminal Color)",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            # Start body color teach if enabled
+            if check_body_color:
+                self.teach_phase = TeachPhase.COLOR_BODY_ROI
+                self._start_body_color_teach()
+            else:
+                # Skip to terminal color
+                if check_terminal_color:
+                    self.teach_phase = TeachPhase.COLOR_TERMINAL_ROI
+                    self._start_terminal_color_teach()
+                else:
+                    self.teach_phase = TeachPhase.DONE
+                    QMessageBox.information(
+                        self,
+                        "Teach Complete",
+                        "Teach process completed successfully.\nClick OK to finish."
+                    )
+                    self._exit_teach_mode()
+        else:
+            # Skip color teaching
+            self.teach_phase = TeachPhase.DONE
+            QMessageBox.information(
+                self,
+                "Teach Complete",
+                "Teach process completed successfully.\nClick OK to finish."
+            )
+            self._exit_teach_mode()
+
+    def _start_body_color_teach(self):
+        """
+        Show overlay for body color ROI selection and capture intensity
+        """
+        QMessageBox.information(
+            self,
+            "Body Color Teach",
+            "Adjust the Red Box to set the body color area.\nPress Enter to confirm."
+        )
+
+        # Create and show overlay for color ROI selection
+        self.teach_overlay = PocketTeachOverlay(self.image_label, self)
+        self.teach_overlay.setGeometry(self.image_label.rect())
+        self.teach_overlay.show()
+        self.teach_overlay.setFocus()
+
+    def _confirm_body_color_teach(self, roi):
+        """
+        Confirm body color ROI and capture mean intensity
+        """
+        params = self.current_params()
+
+        # Map ROI to image coordinates
+        x, y, w, h = self._map_label_roi_to_image(roi)
+
+        # Capture mean intensity from ROI
+        if self.current_image is None:
+            QMessageBox.warning(self, "Error", "No image loaded")
+            return
+
+        import cv2
+        img = self.current_image
+        if img.size == 0:
+            QMessageBox.warning(self, "Error", "Invalid image")
+            return
+
+        # Clamp ROI to image bounds
+        x2 = min(img.shape[1], x + w)
+        y2 = min(img.shape[0], y + h)
+        x = max(0, x)
+        y = max(0, y)
+
+        if x2 <= x or y2 <= y:
+            QMessageBox.warning(self, "Error", "Invalid ROI")
+            return
+
+        roi_img = img[y:y2, x:x2]
+        if roi_img.size == 0:
+            QMessageBox.warning(self, "Error", "ROI is empty")
+            return
+
+        # Convert to grayscale and get mean intensity
+        if len(roi_img.shape) == 3:
+            roi_gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+        else:
+            roi_gray = roi_img
+
+        mean_intensity = int(roi_gray.mean())
+
+        # Save body color intensity with tolerance (±20)
+        tolerance = 20
+        params.body_intensity_min = max(0, mean_intensity - tolerance)
+        params.body_intensity_max = min(255, mean_intensity + tolerance)
+
+        save_teach_data(self.inspection_parameters_by_station)
+
+        # Show confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            "Body Color Captured",
+            f"Body Color Intensity: {mean_intensity}\n(Range: {params.body_intensity_min}-{params.body_intensity_max})\n\nSave this value?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            # Remove overlay and proceed to terminal color
+            if self.teach_overlay:
+                self.teach_overlay.hide()
+                self.teach_overlay.deleteLater()
+                self.teach_overlay = None
+
+            if params.flags.get("check_terminal_color", False):
+                self.teach_phase = TeachPhase.COLOR_TERMINAL_ROI
+                self._start_terminal_color_teach()
+            else:
+                self.teach_phase = TeachPhase.DONE
+                QMessageBox.information(
+                    self,
+                    "Teach Complete",
+                    "Teach process completed successfully.\nClick OK to finish."
+                )
+                self._exit_teach_mode()
+        else:
+            # Retry body color teach
+            self._start_body_color_teach()
+
+    def _start_terminal_color_teach(self):
+        """
+        Show overlay for terminal color ROI selection and capture intensity
+        """
+        QMessageBox.information(
+            self,
+            "Terminal Color Teach",
+            "Adjust the Red Box to set the terminal color area.\nPress Enter to confirm."
+        )
+
+        # Create and show overlay for color ROI selection
+        self.teach_overlay = PocketTeachOverlay(self.image_label, self)
+        self.teach_overlay.setGeometry(self.image_label.rect())
+        self.teach_overlay.show()
+        self.teach_overlay.setFocus()
+
+    def _confirm_terminal_color_teach(self, roi):
+        """
+        Confirm terminal color ROI and capture mean intensity
+        """
+        params = self.current_params()
+
+        # Map ROI to image coordinates
+        x, y, w, h = self._map_label_roi_to_image(roi)
+
+        # Capture mean intensity from ROI
+        if self.current_image is None:
+            QMessageBox.warning(self, "Error", "No image loaded")
+            return
+
+        import cv2
+        img = self.current_image
+        if img.size == 0:
+            QMessageBox.warning(self, "Error", "Invalid image")
+            return
+
+        # Clamp ROI to image bounds
+        x2 = min(img.shape[1], x + w)
+        y2 = min(img.shape[0], y + h)
+        x = max(0, x)
+        y = max(0, y)
+
+        if x2 <= x or y2 <= y:
+            QMessageBox.warning(self, "Error", "Invalid ROI")
+            return
+
+        roi_img = img[y:y2, x:x2]
+        if roi_img.size == 0:
+            QMessageBox.warning(self, "Error", "ROI is empty")
+            return
+
+        # Convert to grayscale and get mean intensity
+        if len(roi_img.shape) == 3:
+            roi_gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+        else:
+            roi_gray = roi_img
+
+        mean_intensity = int(roi_gray.mean())
+
+        # Save terminal color intensity with tolerance (±20)
+        tolerance = 20
+        params.terminal_intensity_min = max(0, mean_intensity - tolerance)
+        params.terminal_intensity_max = min(255, mean_intensity + tolerance)
+
+        save_teach_data(self.inspection_parameters_by_station)
+
+        # Show confirmation dialog
+        reply = QMessageBox.question(
+            self,
+            "Terminal Color Captured",
+            f"Terminal Color Intensity: {mean_intensity}\n(Range: {params.terminal_intensity_min}-{params.terminal_intensity_max})\n\nSave this value?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            # Remove overlay and complete teach
+            if self.teach_overlay:
+                self.teach_overlay.hide()
+                self.teach_overlay.deleteLater()
+                self.teach_overlay = None
+
+            self.teach_phase = TeachPhase.DONE
+            QMessageBox.information(
+                self,
+                "Teach Complete",
+                "Teach process completed successfully.\nClick OK to finish."
+            )
             self._exit_teach_mode()
         else:
-            # Retry package teach
-            self._start_package_roi()
-        save_teach_data(self.inspection_parameters_by_station)
+            # Retry terminal color teach
+            self._start_terminal_color_teach()
     def _exit_teach_mode(self):
         if not self.is_teach_mode:
             return
@@ -1905,6 +2146,18 @@ class MainWindow(QMainWindow):
         if self.teach_phase == TeachPhase.PACKAGE_ROI:
             self.teach_overlay.set_confirmed(True)
             self._confirm_package_teach(roi)
+            return
+
+        # ---- Body Color teach ROI confirm ----
+        if self.teach_phase == TeachPhase.COLOR_BODY_ROI:
+            self.teach_overlay.set_confirmed(True)
+            self._confirm_body_color_teach(roi)
+            return
+
+        # ---- Terminal Color teach ROI confirm ----
+        if self.teach_phase == TeachPhase.COLOR_TERMINAL_ROI:
+            self.teach_overlay.set_confirmed(True)
+            self._confirm_terminal_color_teach(roi)
             return
 
     def _apply_rotation_preview(self, angle_deg: float):
