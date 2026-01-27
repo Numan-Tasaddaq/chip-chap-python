@@ -6,6 +6,7 @@ from pathlib import Path
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QImage, QPixmap
 
+from device.camera_registry import CameraRegistry
 
 
 class GrabService:
@@ -22,26 +23,67 @@ class GrabService:
         self.live_timer = QTimer()
         self.live_timer.timeout.connect(self._grab_live_frame)
         self.live_running = False
+
+        # Load camera registry (Doc1-Doc7 serial number mapping)
+        self.registry_cameras = CameraRegistry.read_registry()
+
         # Map of (track, station) → camera selector
-        # Selector can be:
-        #  - int: OpenCV index (e.g., 0, 1, 2)
-        #  - str: DirectShow name ("video=My USB3 Camera")
-        #  - dict: {"dshow_name": "...", "index": 0} for more explicit config
-        self.camera_map = {
-            # Example: Track1 + TOP → external camera at index 1
-            (1, "TOP"): 1
-        }
+        # Now based on registry Doc indices with fallback to USB indices
+        self.camera_map = self._build_camera_map()
 
         # Optional JSON configuration for cameras.
         # Place a file named "camera_settings.json" at the workspace root with content like:
         # {
+        #   "cameras": [
+        #     {"doc_index": 1, "station": "TOP", "dshow_name": "USB3.0 Camera SN123", "index": 1},
+        #     {"doc_index": 2, "station": "BOTTOM", "dshow_name": "USB3.0 Camera SN456", "index": 2},
+        #     ...
+        #   ],
         #   "preferred": {
-        #       "dshow_name": "USB3.0 Camera Model X1234",  # or user-defined name
-        #       "index": 1                                    # fallback index
+        #     "index": 0  # fallback to laptop camera
         #   }
         # }
         self.camera_settings = self._load_camera_settings()
 
+
+
+
+    def _build_camera_map(self):
+        """
+        Build camera map from registry and settings.
+        Maps (track, station) to camera selector.
+
+        Returns:
+            dict: {(track, station): camera_selector}
+            - camera_selector can be int (CV index), str (DirectShow name), or dict
+        """
+        camera_map = {}
+
+        # Get camera settings from JSON
+        camera_list = self.camera_settings.get("cameras", [])
+
+        # Build map from JSON camera list
+        for cam_config in camera_list:
+            doc_index = cam_config.get("doc_index")
+            station = cam_config.get("station")
+
+            if not (doc_index and station):
+                continue
+
+            # For now, map to all tracks (later: could add track-specific mapping)
+            track = self.main_window.state.track
+            key = (track, station)
+
+            # Prefer DirectShow name, fallback to index
+            dshow_name = cam_config.get("dshow_name")
+            cv_index = cam_config.get("index")
+
+            if dshow_name:
+                camera_map[key] = f"video={dshow_name}"
+            elif isinstance(cv_index, int):
+                camera_map[key] = cv_index
+
+        return camera_map
 
     # =================================================
     # GRAB (single frame)
@@ -178,32 +220,64 @@ class GrabService:
     def _resolve_camera_source(self):
         """
         Resolve preferred camera based on:
-        1) camera_settings.json (DirectShow name or index)
-        2) camera_map for current (track, station)
-        3) fallback to laptop camera index 0
+        1) Windows Registry (Doc1-Doc7 serial number mapping)
+        2) camera_settings.json (DirectShow name or index)
+        3) camera_map for current (track, station)
+        4) fallback to laptop camera index 0
 
         Returns: (source, backend)
-        - source: int index or str name
+        - source: int index or str name or dict
         - backend: cv2 backend flag (e.g., cv2.CAP_DSHOW) or None
         """
         track = self.main_window.state.track
-        station = self.main_window.state.station.value
+        station_enum = self.main_window.state.station
 
-        # 1) JSON settings take priority
+        # Map station enum to string name for lookup
+        # Station enum values are like "Feed", "Top", "Bottom"
+        station_str = station_enum.name if hasattr(station_enum, 'name') else str(station_enum).upper()
+
+        # Get Doc index for this station from registry
+        doc_index = CameraRegistry.get_doc_index(station_str)
+
+        if doc_index:
+            print(f"[CAMERA] Station '{station_str}' mapped to Doc{doc_index}")
+
+            # 1) Check JSON settings for this Doc index
+            camera_list = self.camera_settings.get("cameras", [])
+            for cam_config in camera_list:
+                if cam_config.get("doc_index") == doc_index:
+                    dshow_name = cam_config.get("dshow_name")
+                    cv_index = cam_config.get("index")
+
+                    if dshow_name:
+                        print(f"[CAMERA] Doc{doc_index}: Using DirectShow '{dshow_name}'")
+                        return f"video={dshow_name}", cv2.CAP_DSHOW
+
+                    if isinstance(cv_index, int):
+                        print(f"[CAMERA] Doc{doc_index}: Using CV index {cv_index}")
+                        return cv_index, None
+
+            # 2) Fallback: use Doc index as CV index if registry has SN
+            if doc_index in self.registry_cameras:
+                serial = self.registry_cameras[doc_index]
+                print(f"[CAMERA] Doc{doc_index}: Using registry SN '{serial}' as CV index {doc_index}")
+                return doc_index, None
+
+        # 3) Check global preferred settings
         preferred = self.camera_settings.get("preferred", {})
         dshow_name = preferred.get("dshow_name")
         idx = preferred.get("index")
 
         if dshow_name:
-            print(f"[CAMERA] Preferred DirectShow device: '{dshow_name}'")
+            print(f"[CAMERA] Using preferred DirectShow device: '{dshow_name}'")
             return f"video={dshow_name}", cv2.CAP_DSHOW
 
         if isinstance(idx, int):
-            print(f"[CAMERA] Preferred index from settings: {idx}")
+            print(f"[CAMERA] Using preferred index from settings: {idx}")
             return idx, None
 
-        # 2) camera_map based on track/station
-        key = (track, station)
+        # 4) Check camera_map by (track, station)
+        key = (track, station_str)
         if key in self.camera_map:
             selector = self.camera_map[key]
             if isinstance(selector, dict):
@@ -224,7 +298,7 @@ class GrabService:
                 print(f"[CAMERA] Map index: {selector} for {key}")
                 return selector, None
 
-        # 3) fallback to laptop camera
+        # 5) fallback to laptop camera
         print("[CAMERA] No specific camera found. Using laptop camera (index 0).")
         return 0, cv2.CAP_DSHOW
 

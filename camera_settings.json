@@ -1,6 +1,70 @@
 {
+  "cameras": [
+    {
+      "doc_index": 1,
+      "station": "TOP",
+      "description": "Top inspection",
+      "model": "USB3CT",
+      "type": 0,
+      "dshow_name": "",
+      "index": 1
+    },
+    {
+      "doc_index": 2,
+      "station": "BOTTOM",
+      "description": "Bottom inspection",
+      "model": "USB3CT",
+      "type": 0,
+      "dshow_name": "",
+      "index": 2
+    },
+    {
+      "doc_index": 3,
+      "station": "FEED",
+      "description": "Feed",
+      "model": "USB4CT",
+      "type": 1,
+      "dshow_name": "",
+      "index": 3
+    },
+    {
+      "doc_index": 4,
+      "station": "PICKUP1",
+      "description": "Pick-up 1",
+      "model": "USB3CT",
+      "type": 0,
+      "dshow_name": "",
+      "index": 4
+    },
+    {
+      "doc_index": 5,
+      "station": "PICKUP2",
+      "description": "Pick-up 2",
+      "model": "USB3CT",
+      "type": 0,
+      "dshow_name": "",
+      "index": 5
+    },
+    {
+      "doc_index": 6,
+      "station": "BOTTOM_SEAL",
+      "description": "Bottom sealing",
+      "model": "USB4CT",
+      "type": 1,
+      "dshow_name": "",
+      "index": 6
+    },
+    {
+      "doc_index": 7,
+      "station": "TOP_SEAL",
+      "description": "Top sealing",
+      "model": "USB3CT",
+      "type": 0,
+      "dshow_name": "",
+      "index": 7
+    }
+  ],
   "preferred": {
-    "dshow_name": "",  
-    "index": 0         
+    "index": 0
   }
 }

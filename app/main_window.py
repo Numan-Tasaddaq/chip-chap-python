@@ -64,6 +64,10 @@ class Station(str, Enum):
     FEED = "Feed"
     TOP = "Top"
     BOTTOM = "Bottom"
+    PICKUP1 = "Pick-up 1"
+    PICKUP2 = "Pick-up 2"
+    BOTTOM_SEAL = "Bottom Sealing"
+    TOP_SEAL = "Top Sealing"
 
 
 class RunState(str, Enum):
@@ -127,6 +131,10 @@ class MainWindow(QMainWindow):
             Station.FEED: InspectionParameters(),
             Station.TOP: InspectionParameters(),
             Station.BOTTOM: InspectionParameters(),
+            Station.PICKUP1: InspectionParameters(),
+            Station.PICKUP2: InspectionParameters(),
+            Station.BOTTOM_SEAL: InspectionParameters(),
+            Station.TOP_SEAL: InspectionParameters(),
         }
         loaded = load_teach_data()
         for station_name, params in loaded.items():
@@ -251,12 +259,28 @@ class MainWindow(QMainWindow):
         self.act_station_feed = QAction("     Feed", self, checkable=True)
         self.act_station_top = QAction("     Top", self, checkable=True)
         self.act_station_bottom = QAction("     Bottom", self, checkable=True)
+        self.act_station_pickup1 = QAction("     Pick-up 1", self, checkable=True)
+        self.act_station_pickup2 = QAction("     Pick-up 2", self, checkable=True)
+        self.act_station_bottom_seal = QAction("     Bottom Sealing", self, checkable=True)
+        self.act_station_top_seal = QAction("     Top Sealing", self, checkable=True)
 
         self.act_station_feed.triggered.connect(lambda: self._select_station(Station.FEED))
         self.act_station_top.triggered.connect(lambda: self._select_station(Station.TOP))
         self.act_station_bottom.triggered.connect(lambda: self._select_station(Station.BOTTOM))
+        self.act_station_pickup1.triggered.connect(lambda: self._select_station(Station.PICKUP1))
+        self.act_station_pickup2.triggered.connect(lambda: self._select_station(Station.PICKUP2))
+        self.act_station_bottom_seal.triggered.connect(lambda: self._select_station(Station.BOTTOM_SEAL))
+        self.act_station_top_seal.triggered.connect(lambda: self._select_station(Station.TOP_SEAL))
 
-        for act in (self.act_station_feed, self.act_station_top, self.act_station_bottom):
+        for act in (
+            self.act_station_feed,
+            self.act_station_top,
+            self.act_station_bottom,
+            self.act_station_pickup1,
+            self.act_station_pickup2,
+            self.act_station_bottom_seal,
+            self.act_station_top_seal
+        ):
             station_group.addAction(act)
             m_station.addAction(act)
 
@@ -973,6 +997,10 @@ class MainWindow(QMainWindow):
             self.act_station_feed.setChecked(self.state.station == Station.FEED)
             self.act_station_top.setChecked(self.state.station == Station.TOP)
             self.act_station_bottom.setChecked(self.state.station == Station.BOTTOM)
+            self.act_station_pickup1.setChecked(self.state.station == Station.PICKUP1)
+            self.act_station_pickup2.setChecked(self.state.station == Station.PICKUP2)
+            self.act_station_bottom_seal.setChecked(self.state.station == Station.BOTTOM_SEAL)
+            self.act_station_top_seal.setChecked(self.state.station == Station.TOP_SEAL)
 
     
 
