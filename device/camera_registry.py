@@ -50,6 +50,25 @@ class CameraRegistry:
     }
 
     @classmethod
+    def ensure_registry_exists(cls) -> bool:
+        """
+        Ensure the registry path exists. Creates it if needed.
+
+        Returns:
+            bool: True if registry exists or was created successfully
+        """
+        try:
+            with winreg.CreateKey(
+                winreg.HKEY_CURRENT_USER,
+                cls.REGISTRY_PATH
+            ) as hkey:
+                print(f"[REGISTRY] Registry path ready: {cls.REGISTRY_PATH}")
+                return True
+        except Exception as e:
+            print(f"[REGISTRY] Error creating registry path: {e}")
+            return False
+
+    @classmethod
     def read_registry(cls) -> Dict[int, str]:
         """
         Read camera serial numbers from Windows Registry.
@@ -73,7 +92,8 @@ class CameraRegistry:
                         # Key doesn't exist, skip
                         pass
         except FileNotFoundError:
-            print(f"[REGISTRY] Path not found: {cls.REGISTRY_PATH}")
+            # Registry path doesn't exist - create it for future use
+            cls.ensure_registry_exists()
             return {}
         except Exception as e:
             print(f"[REGISTRY] Error reading registry: {e}")

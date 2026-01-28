@@ -27,10 +27,6 @@ class GrabService:
         # Load camera registry (Doc1-Doc7 serial number mapping)
         self.registry_cameras = CameraRegistry.read_registry()
 
-        # Map of (track, station) → camera selector
-        # Now based on registry Doc indices with fallback to USB indices
-        self.camera_map = self._build_camera_map()
-
         # Optional JSON configuration for cameras.
         # Place a file named "camera_settings.json" at the workspace root with content like:
         # {
@@ -44,6 +40,10 @@ class GrabService:
         #   }
         # }
         self.camera_settings = self._load_camera_settings()
+
+        # Map of (track, station) → camera selector
+        # Now based on registry Doc indices with fallback to USB indices
+        self.camera_map = self._build_camera_map()
 
 
 
