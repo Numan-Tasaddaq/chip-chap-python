@@ -232,8 +232,8 @@ class GrabService:
         track = self.main_window.state.track
         station_enum = self.main_window.state.station
 
-        # Map station enum to string name for lookup
-        # Station enum values are like "Feed", "Top", "Bottom"
+        # Get station string name - use .name for enum name (TOP, BOTTOM, FEED, etc.)
+        # Don't use .value which gives display strings like "Top", "Bottom"
         station_str = station_enum.name if hasattr(station_enum, 'name') else str(station_enum).upper()
 
         # Get Doc index for this station from registry
@@ -246,14 +246,14 @@ class GrabService:
             camera_list = self.camera_settings.get("cameras", [])
             for cam_config in camera_list:
                 if cam_config.get("doc_index") == doc_index:
-                    dshow_name = cam_config.get("dshow_name")
+                    dshow_name = cam_config.get("dshow_name", "").strip()
                     cv_index = cam_config.get("index")
 
-                    if dshow_name:
+                    if dshow_name:  # Only use if non-empty
                         print(f"[CAMERA] Doc{doc_index}: Using DirectShow '{dshow_name}'")
                         return f"video={dshow_name}", cv2.CAP_DSHOW
 
-                    if isinstance(cv_index, int):
+                    if isinstance(cv_index, int) and cv_index >= 0:
                         print(f"[CAMERA] Doc{doc_index}: Using CV index {cv_index}")
                         return cv_index, None
 
@@ -265,14 +265,14 @@ class GrabService:
 
         # 3) Check global preferred settings
         preferred = self.camera_settings.get("preferred", {})
-        dshow_name = preferred.get("dshow_name")
+        dshow_name = preferred.get("dshow_name", "").strip()
         idx = preferred.get("index")
 
-        if dshow_name:
+        if dshow_name:  # Only use if non-empty
             print(f"[CAMERA] Using preferred DirectShow device: '{dshow_name}'")
             return f"video={dshow_name}", cv2.CAP_DSHOW
 
-        if isinstance(idx, int):
+        if isinstance(idx, int) and idx >= 0:
             print(f"[CAMERA] Using preferred index from settings: {idx}")
             return idx, None
 

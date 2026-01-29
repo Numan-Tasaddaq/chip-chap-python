@@ -158,6 +158,9 @@ class MainWindow(QMainWindow):
     def _build_menu_bar(self):
         mb = self.menuBar()
         
+        # List to store disabled features that should be enabled only when ONLINE
+        self.online_only_features = []
+        
         # Professional gradient styling with subtle shadow
         mb.setStyleSheet("""
             QMenuBar {
@@ -349,9 +352,25 @@ class MainWindow(QMainWindow):
         disabled_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Normal))
         m_engineering.addAction(disabled_header)
         
-        self._add_disabled_styled(m_engineering, "     🔒 Camera Enable", QColor("#95a5a6"))
-        self._add_disabled_styled(m_engineering, "     🔒 RunTime Display Enable", QColor("#95a5a6"))
-        self._add_disabled_styled(m_engineering, "     🔒 Camera AOI Resize Mode", QColor("#95a5a6"))
+        act_camera_enable = QAction("     🔒 Camera Enable", self)
+        act_camera_enable.setEnabled(False)
+        font = QFont("Segoe UI", 9)
+        font.setItalic(True)
+        act_camera_enable.setFont(font)
+        m_engineering.addAction(act_camera_enable)
+        self.online_only_features.append(act_camera_enable)
+        
+        act_runtime_display = QAction("     🔒 RunTime Display Enable", self)
+        act_runtime_display.setEnabled(False)
+        act_runtime_display.setFont(font)
+        m_engineering.addAction(act_runtime_display)
+        self.online_only_features.append(act_runtime_display)
+        
+        act_camera_aoi = QAction("     🔒 Camera AOI Resize Mode", self)
+        act_camera_aoi.setEnabled(False)
+        act_camera_aoi.setFont(font)
+        m_engineering.addAction(act_camera_aoi)
+        self.online_only_features.append(act_camera_aoi)
 
         # ---------- Configuration ----------
         m_config = mb.addMenu(" Configuration ")
@@ -425,8 +444,19 @@ class MainWindow(QMainWindow):
         system_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         m_config.addAction(system_header)
         
-        self._add_disabled_styled(m_config, "     ⚠️ Enable / Disable Inspection", QColor("#95a5a6"))
-        self._add_disabled_styled(m_config, "     ⚠️ Camera Configuration", QColor("#95a5a6"))
+        act_inspection_disable = QAction("     ⚠️ Enable / Disable Inspection", self)
+        act_inspection_disable.setEnabled(False)
+        font = QFont("Segoe UI", 9)
+        font.setItalic(True)
+        act_inspection_disable.setFont(font)
+        m_config.addAction(act_inspection_disable)
+        self.online_only_features.append(act_inspection_disable)
+        
+        act_camera_config = QAction("     ⚠️ Camera Configuration", self)
+        act_camera_config.setEnabled(False)
+        act_camera_config.setFont(font)
+        m_config.addAction(act_camera_config)
+        self.online_only_features.append(act_camera_config)
 
         # Color Inspection submenu with color palette icon
         m_color = QMenu("🎨 Color Inspection", self)
@@ -1339,6 +1369,11 @@ class MainWindow(QMainWindow):
         # If switching OFFLINE → stop LIVE immediately
         if not online:
             self.grab_service.stop_live()
+        
+        # Enable/Disable disabled features based on online/offline state
+        for feature in self.online_only_features:
+            feature.setEnabled(online)
+        
         if hasattr(self, "act_online_offline"):
             self.act_online_offline.blockSignals(True)
             self.act_online_offline.setChecked(offline)
