@@ -2,16 +2,19 @@
 import cv2
 import json
 from pathlib import Path
+import numpy as np
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QImage, QPixmap
 
 from device.camera_registry import CameraRegistry
+from device.teli_camera import TeliCamera
+from config.camera_parameters_io import load_camera_parameters
 
 
 class GrabService:
     """
-    Handles GRAB and LIVE camera operations.
+    Handles GRAB and LIVE camera operations using Teli SDK.
 
     - GRAB  : single frame capture
     - LIVE  : continuous capture using QTimer
@@ -19,34 +22,27 @@ class GrabService:
 
     def __init__(self, main_window):
         self.main_window = main_window
-        self.cap = None
+        self.teli_camera = None  # Teli SDK camera instance
+        self.cap = None  # OpenCV fallback
         self.live_timer = QTimer()
         self.live_timer.timeout.connect(self._grab_live_frame)
         self.live_running = False
+        self.using_teli_sdk = False  # Track which backend is active
 
-        # Load camera registry (Doc1-Doc7 serial number mapping)
+        # Load camera registry (serial number mapping)
         self.registry_cameras = CameraRegistry.read_registry()
 
-        # Optional JSON configuration for cameras.
-        # Place a file named "camera_settings.json" at the workspace root with content like:
-        # {
-        #   "cameras": [
-        #     {"doc_index": 1, "station": "TOP", "dshow_name": "USB3.0 Camera SN123", "index": 1},
-        #     {"doc_index": 2, "station": "BOTTOM", "dshow_name": "USB3.0 Camera SN456", "index": 2},
-        #     ...
-        #   ],
-        #   "preferred": {
-        #     "index": 0  # fallback to laptop camera
-        #   }
-        # }
+        # Initialize Teli SDK
+        try:
+            self.teli_camera = TeliCamera()
+            print("[CAMERA] Teli SDK initialized")
+        except Exception as e:
+            print(f"[CAMERA] Teli SDK not available: {e}")
+            self.teli_camera = None
+
+        # Optional JSON configuration for cameras (OpenCV fallback)
         self.camera_settings = self._load_camera_settings()
-
-        # Map of (track, station) → camera selector
-        # Now based on registry Doc indices with fallback to USB indices
         self.camera_map = self._build_camera_map()
-
-
-
 
     def _build_camera_map(self):
         """
@@ -55,14 +51,10 @@ class GrabService:
 
         Returns:
             dict: {(track, station): camera_selector}
-            - camera_selector can be int (CV index), str (DirectShow name), or dict
         """
         camera_map = {}
-
-        # Get camera settings from JSON
         camera_list = self.camera_settings.get("cameras", [])
 
-        # Build map from JSON camera list
         for cam_config in camera_list:
             doc_index = cam_config.get("doc_index")
             station = cam_config.get("station")
@@ -70,11 +62,9 @@ class GrabService:
             if not (doc_index and station):
                 continue
 
-            # For now, map to all tracks (later: could add track-specific mapping)
             track = self.main_window.state.track
             key = (track, station)
 
-            # Prefer DirectShow name, fallback to index
             dshow_name = cam_config.get("dshow_name")
             cv_index = cam_config.get("index")
 
@@ -101,6 +91,19 @@ class GrabService:
         if self.live_running:
             self.stop_live()
 
+        # Try Teli SDK first
+        if self.teli_camera is not None:
+            try:
+                frame = self._grab_teli_frame()
+                if frame is not None:
+                    self.main_window.current_image = frame
+                    self._display_frame(frame)
+                    return
+            except Exception as e:
+                print(f"[CAMERA] GRAB: Teli SDK failed: {e}")
+
+        # Fallback to OpenCV
+        print("[CAMERA] GRAB: Using OpenCV fallback")
         source, backend = self._resolve_camera_source()
         cap = self._open_capture(source, backend)
 
@@ -110,7 +113,10 @@ class GrabService:
             cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             if not cap.isOpened():
                 print("[CAMERA] GRAB: Laptop camera also failed.")
-            return
+                cap.release()
+                return
+            else:
+                print("[CAMERA] GRAB: Laptop camera opened successfully.")
 
         ret, frame = cap.read()
         cap.release()
@@ -142,6 +148,21 @@ class GrabService:
         if self.live_running:
             return
 
+        # Try Teli SDK first
+        if self.teli_camera is not None:
+            try:
+                if self._start_teli_live():
+                    self.using_teli_sdk = True
+                    self.live_running = True
+                    self.live_timer.start(30)  # ~30 FPS
+                    return
+            except Exception as e:
+                print(f"[CAMERA] LIVE: Teli SDK failed: {e}")
+                self.using_teli_sdk = False
+
+        # Fallback to OpenCV
+        print("[CAMERA] LIVE: Using OpenCV fallback")
+        self.using_teli_sdk = False
         source, backend = self._resolve_camera_source()
         self.cap = self._open_capture(source, backend)
 
@@ -151,8 +172,12 @@ class GrabService:
             self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             if not self.cap.isOpened():
                 print("[CAMERA] LIVE: Laptop camera also failed.")
-            self.cap = None
-            return
+                if self.cap:
+                    self.cap.release()
+                self.cap = None
+                return
+            else:
+                print("[CAMERA] LIVE: Laptop camera opened successfully.")
 
         self.live_running = True
         self.live_timer.start(30)  # ~30 FPS
@@ -164,11 +189,36 @@ class GrabService:
         self.live_timer.stop()
         self.live_running = False
 
+        # Stop Teli SDK acquisition
+        if self.using_teli_sdk and self.teli_camera is not None:
+            try:
+                self.teli_camera.stop_grab()
+                self.teli_camera.close()
+            except Exception as e:
+                print(f"[CAMERA] Stop Teli SDK error: {e}")
+            self.using_teli_sdk = False
+
+        # Stop OpenCV
         if self.cap is not None:
             self.cap.release()
             self.cap = None
 
     def _grab_live_frame(self):
+        # Teli SDK path
+        if self.using_teli_sdk and self.teli_camera is not None:
+            try:
+                frame = self.teli_camera.grab_image(timeout_ms=100)
+                if frame is not None:
+                    # Convert mono to BGR for display
+                    if len(frame.shape) == 2:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                    self.main_window.current_image = frame
+                    self._display_frame(frame)
+            except Exception as e:
+                print(f"[CAMERA] Teli grab error: {e}")
+            return
+
+        # OpenCV path
         if not self.cap:
             return
 
@@ -200,6 +250,7 @@ class GrabService:
         pix = QPixmap.fromImage(qimg)
         self.main_window._display_pixmap(pix)
         self.main_window.current_image = frame
+
     # =================================================
     # Camera selection helpers
     # =================================================
@@ -219,37 +270,24 @@ class GrabService:
 
     def _resolve_camera_source(self):
         """
-        Resolve preferred camera based on:
-        1) Windows Registry (Doc1-Doc7 serial number mapping)
-        2) camera_settings.json (DirectShow name or index)
-        3) camera_map for current (track, station)
-        4) fallback to laptop camera index 0
-
+        Resolve preferred camera (OpenCV fallback only).
         Returns: (source, backend)
-        - source: int index or str name or dict
-        - backend: cv2 backend flag (e.g., cv2.CAP_DSHOW) or None
         """
         track = self.main_window.state.track
         station_enum = self.main_window.state.station
-
-        # Get station string name - use .name for enum name (TOP, BOTTOM, FEED, etc.)
-        # Don't use .value which gives display strings like "Top", "Bottom"
         station_str = station_enum.name if hasattr(station_enum, 'name') else str(station_enum).upper()
 
-        # Get Doc index for this station from registry
         doc_index = CameraRegistry.get_doc_index(station_str)
 
         if doc_index:
             print(f"[CAMERA] Station '{station_str}' mapped to Doc{doc_index}")
-
-            # 1) Check JSON settings for this Doc index
             camera_list = self.camera_settings.get("cameras", [])
             for cam_config in camera_list:
                 if cam_config.get("doc_index") == doc_index:
                     dshow_name = cam_config.get("dshow_name", "").strip()
                     cv_index = cam_config.get("index")
 
-                    if dshow_name:  # Only use if non-empty
+                    if dshow_name:
                         print(f"[CAMERA] Doc{doc_index}: Using DirectShow '{dshow_name}'")
                         return f"video={dshow_name}", cv2.CAP_DSHOW
 
@@ -257,18 +295,12 @@ class GrabService:
                         print(f"[CAMERA] Doc{doc_index}: Using CV index {cv_index}")
                         return cv_index, None
 
-            # 2) Fallback: use Doc index as CV index if registry has SN
-            if doc_index in self.registry_cameras:
-                serial = self.registry_cameras[doc_index]
-                print(f"[CAMERA] Doc{doc_index}: Using registry SN '{serial}' as CV index {doc_index}")
-                return doc_index, None
-
-        # 3) Check global preferred settings
+        # Check global preferred settings
         preferred = self.camera_settings.get("preferred", {})
         dshow_name = preferred.get("dshow_name", "").strip()
         idx = preferred.get("index")
 
-        if dshow_name:  # Only use if non-empty
+        if dshow_name:
             print(f"[CAMERA] Using preferred DirectShow device: '{dshow_name}'")
             return f"video={dshow_name}", cv2.CAP_DSHOW
 
@@ -276,7 +308,7 @@ class GrabService:
             print(f"[CAMERA] Using preferred index from settings: {idx}")
             return idx, None
 
-        # 4) Check camera_map by (track, station)
+        # Check camera_map by (track, station)
         key = (track, station_str)
         if key in self.camera_map:
             selector = self.camera_map[key]
@@ -290,7 +322,6 @@ class GrabService:
                     print(f"[CAMERA] Map index: {idx2} for {key}")
                     return idx2, None
             elif isinstance(selector, str):
-                # Accept direct show name as "video=..."
                 print(f"[CAMERA] Map string selector: {selector}")
                 backend = cv2.CAP_DSHOW if selector.startswith("video=") else None
                 return selector, backend
@@ -298,17 +329,12 @@ class GrabService:
                 print(f"[CAMERA] Map index: {selector} for {key}")
                 return selector, None
 
-        # 5) fallback to laptop camera
+        # fallback to laptop camera
         print("[CAMERA] No specific camera found. Using laptop camera (index 0).")
         return 0, cv2.CAP_DSHOW
 
     def _open_capture(self, source, backend=None):
-        """
-        Open cv2.VideoCapture with optional backend.
-        - If source is a string, backend is likely cv2.CAP_DSHOW for DirectShow.
-        - If backend is None, OpenCV chooses default.
-        Also logs basic info for debugging.
-        """
+        """Open cv2.VideoCapture with optional backend."""
         try:
             if backend is not None:
                 cap = cv2.VideoCapture(source, backend)
@@ -318,7 +344,6 @@ class GrabService:
             print(f"[CAMERA] OpenCapture error for source '{source}': {e}")
             return cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
-        # Print basic info for debugging
         if cap.isOpened():
             width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
             height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
@@ -328,3 +353,96 @@ class GrabService:
             print(f"[CAMERA] Failed to open source={source} backend={backend}")
 
         return cap
+
+    # =================================================
+    # Teli SDK helpers
+    # =================================================
+    def _get_camera_serial_for_track(self) -> str:
+        """Get camera serial number for current track from registry"""
+        track = self.main_window.state.track
+        
+        if track == 1:
+            return CameraRegistry.get_track1_serial()
+        elif track == 2:
+            return CameraRegistry.get_track2_serial()
+        else:
+            print(f"[CAMERA] Unknown track: {track}")
+            return None
+    
+    def _load_camera_settings_for_track(self) -> dict:
+        """Load camera settings from .cam file for current track"""
+        try:
+            config_name = self.main_window.state.config_name
+            track = self.main_window.state.track
+            
+            # Get inspection directory
+            inspection_dir = Path(self.main_window.state.inspection_dir)
+            config_dir = inspection_dir / config_name
+            
+            if not config_dir.exists():
+                print(f"[CAMERA] Config dir not found: {config_dir}")
+                return {}
+            
+            settings = load_camera_parameters(str(config_dir), config_name, track)
+            return settings
+        except Exception as e:
+            print(f"[CAMERA] Failed to load camera settings: {e}")
+            return {}
+    
+    def _grab_teli_frame(self) -> np.ndarray:
+        """Grab single frame using Teli SDK"""
+        serial = self._get_camera_serial_for_track()
+        if not serial:
+            raise RuntimeError("No serial number for current track")
+        
+        print(f"[CAMERA] Opening camera: {serial}")
+        
+        # Open camera by serial
+        self.teli_camera.open_by_serial(serial)
+        
+        # Load and apply settings
+        settings = self._load_camera_settings_for_track()
+        if settings:
+            self.teli_camera.apply_settings(settings)
+        
+        # Start acquisition
+        self.teli_camera.start_grab()
+        
+        # Grab frame
+        frame = self.teli_camera.grab_image(timeout_ms=1000)
+        
+        # Stop and close
+        self.teli_camera.stop_grab()
+        self.teli_camera.close()
+        
+        if frame is None:
+            raise RuntimeError("Failed to capture frame (timeout)")
+        
+        # Convert mono to BGR for display
+        if len(frame.shape) == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        
+        return frame
+    
+    def _start_teli_live(self) -> bool:
+        """Start continuous acquisition using Teli SDK"""
+        serial = self._get_camera_serial_for_track()
+        if not serial:
+            print("[CAMERA] No serial number for current track")
+            return False
+        
+        print(f"[CAMERA] Opening camera for LIVE: {serial}")
+        
+        # Open camera by serial
+        self.teli_camera.open_by_serial(serial)
+        
+        # Load and apply settings
+        settings = self._load_camera_settings_for_track()
+        if settings:
+            self.teli_camera.apply_settings(settings)
+        
+        # Start acquisition
+        self.teli_camera.start_grab()
+        
+        print("[CAMERA] Teli LIVE started")
+        return True
