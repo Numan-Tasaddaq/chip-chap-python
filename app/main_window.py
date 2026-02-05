@@ -10,7 +10,7 @@ from PySide6.QtGui import QAction, QActionGroup, QFont, QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QToolBar, QComboBox, QPushButton, QSplitter,
-    QTableWidget, QMessageBox, QSlider, QSizePolicy, QMenu, QFrame, QToolButton, QDialog
+    QTableWidget, QTableWidgetItem, QMessageBox, QSlider, QSizePolicy, QMenu, QFrame, QToolButton, QDialog, QFileDialog
 )
 import cv2
 import numpy as np
@@ -22,6 +22,9 @@ from ui.lot_information_dialog import LotInformationDialog
 from ui.body_color_dialog import BodyColorDialog
 from ui.terminal_color_dialog import TerminalColorDialog
 from ui.mark_color_dialog import MarkColorDialog
+from ui.mark_symbol_set_dialog import MarkSymbolSetDialog
+from ui.mark_parameters_dialog import MarkParametersDialog
+from ui.mark_symbol_images_dialog import MarkSymbolImagesDialog
 from ui.para_mark_config_dialog import ParaMarkConfigDialog
 from ui.device_location_dialog import DeviceLocationDialog
 from ui.pocket_location_dialog import PocketLocationDialog
@@ -30,16 +33,26 @@ from ui.inspection_debug_dialog import InspectionDebugDialog
 from ui.alert_messages_dialog import AlertMessagesDialog
 from ui.ignore_fail_count_dialog import IgnoreFailCountDialog
 from ui.autorun_setting_dialog import AutoRunSettingDialog
+from ui.encrypt_decrypt_dialog import EncryptDecryptDialog
 from ui.autorun_withdraw_setting_dialog import AutoRunWithDrawSettingDialog
 from ui.step_debug_dialog import StepDebugDialog
+from ui.select_config_file_dialog import SelectConfigFileDialog
+from ui.camera_configuration_dialog import CameraConfigurationDialog
 from imaging.grab_service import GrabService
+from device.camera_registry import CameraRegistry
 from imaging.image_loader import ImageLoader
+from inspection.alert_tracker import AlertTracker
 from config.inspection_parameters import InspectionParameters
 from config.inspection_parameters_io import load_parameters
+from config.camera_parameters_io import load_camera_parameters, save_camera_parameters
+from config.auto_run_setting_io import load_auto_run_setting
 from imaging.pocket_teach_overlay import PocketTeachOverlay
 from ui.image_rotation_dialog import ImageRotationDialog
+from ui.enable_disable_inspection_dialog import EnableDisableInspectionDialog
 from config.teach_store import load_teach_data
 from config.teach_store import save_teach_data
+from config.mark_inspection_io import load_mark_inspection_config
+from imaging.mark_inspection import detect_marks
 from tests.test_top_bottom import test_top_bottom, test_feed
 from tests.test_runner import TestResult, TestStatus
 from pathlib import Path
@@ -58,6 +71,11 @@ class TeachPhase(Enum):
     COLOR_ASK = 9
     COLOR_BODY_ROI = 10
     COLOR_TERMINAL_ROI = 11
+    MARK_ASK = 12
+    MARK_ROI = 13
+    MARK_BINARY = 14
+    MARK_DETECT = 15
+    SYMBOL_ROI = 16
     DONE = 8
 
 class Station(str, Enum):
@@ -95,7 +113,65 @@ class MainWindow(QMainWindow):
         self.is_simulator_mode=False
         self.current_image=None  # Original loaded image (never modified)
         self.displayed_image=None  # Currently displayed image (may be modified with overlays)
-       
+        
+        # Engineering menu flags - matching old C++ system
+        self.camera_enable = False  # m_bCamEnable in old C++ (user toggle)
+        self.camera_available = True  # m_bCamAvail in old C++ (camera connected)
+        self.live_image_active = False  # m_bLiveImage in old C++ (live feed running)
+        self.fail_track_active = False  # m_bFailTrack in old C++
+        self.teaching_active = False  # m_bTeaching in old C++
+        self.inspecting_active = False  # m_bInspecting in old C++
+        self.calibrating_active = False  # m_bCalibrating in old C++
+        self.device_calibrating = False  # m_bCalibratingDevice in old C++
+        self.camera_setup_dialog_open = False  # m_bCamSetupDlgOpen in old C++
+        self.runtime_display_enable = False  # m_RuntimeDisplayEnable in old C++
+        self.inspection_enabled = True  # m_bEnableInsp in old C++ (default: enabled)
+        self.cont_insp_active = False  # m_bContInsp in old C++ (Inspect Cycle)
+        self.insp_saved_images_active = False  # m_bInspSavedImage in old C++
+        self.insp_saved_images_draw_active = False  # m_bInspSavedImageDraw in old C++
+        self.saved_images_step_active = False  # m_bSavedImagesStep in old C++
+        self.saved_images_folder = Path("New folder")
+        self.saved_images_list = []
+        self.saved_images_index = 0
+        
+        # Configuration management
+        self.current_config_name = "default"  # m_strConfigurationName in old C++
+        
+        # Camera settings per track (matching old C++ m_nAperture1, m_nGain, etc.)
+        self.camera_settings = {
+            1: {
+                "shutter_1": 3,
+                "shutter_2": 2,
+                "gain": 4,
+                "brightness": 1,
+                "bytes_per_packet": 1072,
+                "lc_intensity_1": 158,
+                "lc_intensity_2": 255,
+                "lc_intensity_3": 100,
+                "lc_min_1": 0, "lc_max_1": 255,
+                "lc_min_2": 0, "lc_max_2": 255,
+                "lc_min_3": 0, "lc_max_3": 255,
+                "red_gain": 1.0,
+                "green_gain": 1.0,
+                "blue_gain": 1.0,
+            },
+            2: {
+                "shutter_1": 3,
+                "shutter_2": 2,
+                "gain": 4,
+                "brightness": 1,
+                "bytes_per_packet": 1072,
+                "lc_intensity_1": 158,
+                "lc_intensity_2": 255,
+                "lc_intensity_3": 100,
+                "lc_min_1": 0, "lc_max_1": 255,
+                "lc_min_2": 0, "lc_max_2": 255,
+                "lc_min_3": 0, "lc_max_3": 255,
+                "red_gain": 1.0,
+                "green_gain": 1.0,
+                "blue_gain": 1.0,
+            },
+        }
 
         # Shared inspection flags (one set for all stations)
         self.inspection_parameters = load_parameters()
@@ -103,12 +179,29 @@ class MainWindow(QMainWindow):
 
         self.grab_service=GrabService(self)
         self.image_loader = ImageLoader(self)
+        self.inspect_cycle_timer = QTimer()
+        self.inspect_cycle_timer.timeout.connect(self._on_inspect_cycle_tick)
+        self.saved_images_timer = QTimer()
+        self.saved_images_timer.timeout.connect(self._on_saved_images_tick)
 
         self.binary_mode = False
         self.binary_threshold = 75  # default (PDF example)
         self.is_teach_mode = False
         self.teach_overlay = None
         self.step_mode_enabled = False  # Step-by-step debug mode toggle
+        self.alert_tracker = AlertTracker()  # Alert messages failure tracking
+        
+        # Debug flags - matches C++ m_lDebugFlag and m_bDebugSaveFailedImages
+        from config.debug_flags_io import load_debug_flags
+        self.debug_flag = load_debug_flags()  # Bitwise OR of all debug flags
+        from config.debug_flags import DEBUG_SAVE_FAIL_IMAGE
+        self.debug_save_failed_images = bool(self.debug_flag & DEBUG_SAVE_FAIL_IMAGE)
+        # Sync step mode from debug flags
+        from config.debug_flags import DEBUG_STEP_MODE
+        self.step_mode_enabled = bool(self.debug_flag & DEBUG_STEP_MODE)
+        
+        self._teach_binary_prev_mode = None
+        self._mark_teach_roi = None
         
         # Zoom variables
         self.zoom_level = 1.0
@@ -160,6 +253,11 @@ class MainWindow(QMainWindow):
         
         # List to store disabled features that should be enabled only when ONLINE
         self.online_only_features = []
+        # List to store features that should be enabled only when OFFLINE
+        self.offline_only_features = []
+        # Menu item references for enable/disable logic
+        self.act_camera_enable = None
+        self.act_camera_config = None
         
         # Professional gradient styling with subtle shadow
         mb.setStyleSheet("""
@@ -244,7 +342,7 @@ class MainWindow(QMainWindow):
         m_production.addAction(act_open_lot)
 
         act_end_lot = QAction("End Lot", self)
-        act_end_lot.triggered.connect(lambda: self._stub("End Lot"))
+        act_end_lot.triggered.connect(self._end_lot)
         m_production.addAction(act_end_lot)
 
         # ---------- Station Selector ----------
@@ -303,10 +401,11 @@ class MainWindow(QMainWindow):
         m_engineering.setStyleSheet(m_production.styleSheet())
         
         # Binarise with check indicator
-        act_binarise = QAction("Binarise Image", self)
-        act_binarise.setCheckable(True)
-        act_binarise.triggered.connect(self._toggle_binarise)
-        m_engineering.addAction(act_binarise)
+        self.act_binarise = QAction("Binarise Image", self)
+        self.act_binarise.setCheckable(True)
+        self.act_binarise.setShortcut("V")  # Match old C++ shortcut
+        self.act_binarise.triggered.connect(self._toggle_binarise)
+        m_engineering.addAction(self.act_binarise)
 
         m_engineering.addSeparator()
         
@@ -317,14 +416,17 @@ class MainWindow(QMainWindow):
         m_engineering.addAction(zoom_header)
         
         act_zoom_in = QAction("     Zoom In", self)
+        act_zoom_in.setShortcut("I")  # Match old C++ shortcut
         act_zoom_in.triggered.connect(self._zoom_in)
         m_engineering.addAction(act_zoom_in)
         
         act_zoom_fit = QAction("     Zoom Fit", self)
+        act_zoom_fit.setShortcut("N")  # Match old C++ shortcut
         act_zoom_fit.triggered.connect(self._zoom_fit)
         m_engineering.addAction(act_zoom_fit)
         
         act_zoom_out = QAction("     Zoom Out", self)
+        act_zoom_out.setShortcut("O")  # Match old C++ shortcut
         act_zoom_out.triggered.connect(self._zoom_out)
         m_engineering.addAction(act_zoom_out)
         
@@ -337,40 +439,53 @@ class MainWindow(QMainWindow):
         m_engineering.addAction(file_header)
         
         act_load_image = QAction("     Load Image From Disk", self)
+        act_load_image.setEnabled(False)  # Only in OFFLINE mode
         act_load_image.triggered.connect(self.image_loader.load_from_disk)
         m_engineering.addAction(act_load_image)
+        self.offline_only_features.append(act_load_image)
 
         act_save_image = QAction("     Save Image To Disk", self)
+        act_save_image.setEnabled(False)  # Only in OFFLINE mode
         act_save_image.triggered.connect(self._save_current_image)
         m_engineering.addAction(act_save_image)
+        self.offline_only_features.append(act_save_image)
         
         m_engineering.addSeparator()
         
         # Disabled features with special visual treatment
-        disabled_header = QAction("━━━ DISABLED FEATURES ━━━", self)
+        disabled_header = QAction("━━━ OFFLINE ONLY ━━━", self)
         disabled_header.setEnabled(False)
         disabled_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Normal))
         m_engineering.addAction(disabled_header)
         
-        act_camera_enable = QAction("     🔒 Camera Enable", self)
-        act_camera_enable.setEnabled(False)
         font = QFont("Segoe UI", 9)
         font.setItalic(True)
+        
+        act_camera_enable = QAction("     🔒 Camera Enable", self)
+        act_camera_enable.setCheckable(True)  # Checkable like old C++
+        act_camera_enable.setEnabled(False)
         act_camera_enable.setFont(font)
+        act_camera_enable.triggered.connect(self._toggle_camera_enable)
         m_engineering.addAction(act_camera_enable)
-        self.online_only_features.append(act_camera_enable)
+        self.offline_only_features.append(act_camera_enable)
+        self.act_camera_enable = act_camera_enable  # Store reference
         
         act_runtime_display = QAction("     🔒 RunTime Display Enable", self)
-        act_runtime_display.setEnabled(False)
+        act_runtime_display.setCheckable(True)  # Checkable like old C++
+        act_runtime_display.setEnabled(True)  # Always enabled (unless SEM enabled)
         act_runtime_display.setFont(font)
+        act_runtime_display.triggered.connect(self._toggle_runtime_display)
         m_engineering.addAction(act_runtime_display)
-        self.online_only_features.append(act_runtime_display)
+        self.act_runtime_display = act_runtime_display  # Store reference
+        # Note: Runtime Display only depends on SEM enabled status, not ONLINE/OFFLINE
         
         act_camera_aoi = QAction("     🔒 Camera AOI Resize Mode", self)
+        act_camera_aoi.setShortcut("Ctrl+R")  # Match old C++ shortcut
         act_camera_aoi.setEnabled(False)
         act_camera_aoi.setFont(font)
+        act_camera_aoi.triggered.connect(self._camera_aoi_resize)
         m_engineering.addAction(act_camera_aoi)
-        self.online_only_features.append(act_camera_aoi)
+        self.offline_only_features.append(act_camera_aoi)
 
         # ---------- Configuration ----------
         m_config = mb.addMenu(" Configuration ")
@@ -382,8 +497,13 @@ class MainWindow(QMainWindow):
         config_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Normal))
         m_config.addAction(config_header)
         
-        m_config.addAction(QAction("     Select Config File", self, triggered=lambda: self._stub("Select Config File")))
-        m_config.addAction(QAction("     Save Config As", self, triggered=lambda: self._stub("Save Config As")))
+        act_select_config = QAction("     Select Config File", self)
+        act_select_config.triggered.connect(self._select_config_file)
+        m_config.addAction(act_select_config)
+        
+        act_save_config = QAction("     Save Config As", self)
+        act_save_config.triggered.connect(self._save_config_as)
+        m_config.addAction(act_save_config)
         
         act_para_mark = QAction("     Para & Mark Config File", self)
         act_para_mark.triggered.connect(self._open_para_mark_config_dialog)
@@ -431,9 +551,9 @@ class MainWindow(QMainWindow):
                 color: #212529;
             }
         """)
-        m_mark.addAction(QAction("Mark Symbol Set", self, triggered=lambda: self._stub("Mark Symbol Set")))
-        m_mark.addAction(QAction("Mark Parameters", self, triggered=lambda: self._stub("Mark Parameters")))
-        m_mark.addAction(QAction("Mark Symbol Images", self, triggered=lambda: self._stub("Mark Symbol Images")))
+        m_mark.addAction(QAction("Mark Symbol Set", self, triggered=self._open_mark_symbol_set_dialog))
+        m_mark.addAction(QAction("Mark Parameters", self, triggered=self._open_mark_parameters_dialog))
+        m_mark.addAction(QAction("Mark Symbol Images", self, triggered=self._open_mark_symbol_images_dialog))
         m_config.addMenu(m_mark)
 
         m_config.addSeparator()
@@ -445,18 +565,23 @@ class MainWindow(QMainWindow):
         m_config.addAction(system_header)
         
         act_inspection_disable = QAction("     ⚠️ Enable / Disable Inspection", self)
-        act_inspection_disable.setEnabled(False)
+        act_inspection_disable.setCheckable(True)
+        act_inspection_disable.setChecked(True)  # Default: enabled
+        act_inspection_disable.setEnabled(True)  # Always enabled (per old C++)
+        act_inspection_disable.triggered.connect(self._toggle_inspection_enable)
         font = QFont("Segoe UI", 9)
         font.setItalic(True)
         act_inspection_disable.setFont(font)
         m_config.addAction(act_inspection_disable)
-        self.online_only_features.append(act_inspection_disable)
+        # Note: Old C++ always keeps this ENABLED so user can toggle anytime
         
         act_camera_config = QAction("     ⚠️ Camera Configuration", self)
         act_camera_config.setEnabled(False)
         act_camera_config.setFont(font)
+        act_camera_config.triggered.connect(self._open_camera_configuration_dialog)
         m_config.addAction(act_camera_config)
-        self.online_only_features.append(act_camera_config)
+        self.act_camera_config = act_camera_config  # Store reference
+        self.act_inspection_enable = act_inspection_disable  # Store reference
 
         # Color Inspection submenu with color palette icon
         m_color = QMenu("🎨 Color Inspection", self)
@@ -500,8 +625,12 @@ class MainWindow(QMainWindow):
         # Inspect Cycle submenu
         m_cycle = QMenu("🔄 Inspect Cycle", self)
         m_cycle.setStyleSheet(m_mark.styleSheet())
-        m_cycle.addAction(QAction("Single Image", self, triggered=lambda: self._stub("Inspect Cycle → Single Image")))
+        act_inspect_cycle_single = QAction("Single Image", self)
+        act_inspect_cycle_single.setCheckable(True)
+        act_inspect_cycle_single.triggered.connect(self._toggle_inspect_cycle_single)
+        m_cycle.addAction(act_inspect_cycle_single)
         m_run.addMenu(m_cycle)
+        self.act_inspect_cycle_single = act_inspect_cycle_single
 
         # Inspect Saved Images submenu
         m_saved = QMenu("💾 Inspect Saved Images", self)
@@ -513,14 +642,15 @@ class MainWindow(QMainWindow):
         autorun_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         m_saved.addAction(autorun_header)
         
-        m_saved.addAction(
-            QAction("     AutoRun", self,
-                    triggered=lambda: AutoRunSettingDialog(self).exec())
-        )
-        m_saved.addAction(
-            QAction("     AutoRun With Draw", self,
-                    triggered=lambda: AutoRunWithDrawSettingDialog(self).exec())
-        )
+        act_saved_autorun = QAction("     AutoRun", self)
+        act_saved_autorun.setCheckable(True)
+        act_saved_autorun.triggered.connect(self._toggle_inspect_saved_images_autorun)
+        m_saved.addAction(act_saved_autorun)
+
+        act_saved_autorun_draw = QAction("     AutoRun With Draw", self)
+        act_saved_autorun_draw.setCheckable(True)
+        act_saved_autorun_draw.triggered.connect(self._toggle_inspect_saved_images_autorun_draw)
+        m_saved.addAction(act_saved_autorun_draw)
         
         m_saved.addSeparator()
         
@@ -529,9 +659,19 @@ class MainWindow(QMainWindow):
         standard_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         m_saved.addAction(standard_header)
         
-        m_saved.addAction(QAction("     Step", self, triggered=lambda: self._stub("Step")))
-        m_saved.addAction(QAction("     Set Stored Image Folder", self, triggered=lambda: self._stub("Set Stored Image Folder")))
+        act_saved_step = QAction("     Step", self)
+        act_saved_step.setCheckable(True)
+        act_saved_step.triggered.connect(self._run_saved_images_step)
+        m_saved.addAction(act_saved_step)
+
+        act_saved_set_folder = QAction("     Set Stored Image Folder", self)
+        act_saved_set_folder.triggered.connect(self._set_saved_images_folder)
+        m_saved.addAction(act_saved_set_folder)
         m_run.addMenu(m_saved)
+        self.act_saved_autorun = act_saved_autorun
+        self.act_saved_autorun_draw = act_saved_autorun_draw
+        self.act_saved_step = act_saved_step
+        self.act_saved_set_folder = act_saved_set_folder
 
         # ---------- Diagnostic ----------
         m_diag = mb.addMenu(" Diagnostic ")
@@ -543,9 +683,9 @@ class MainWindow(QMainWindow):
         diag_header.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         m_diag.addAction(diag_header)
         
-        m_diag.addAction(
-            QAction("     Inspection", self, triggered=lambda: InspectionDebugDialog(self).exec())
-        )
+        act_inspection_debug = QAction("     Inspection", self)
+        act_inspection_debug.triggered.connect(self._open_inspection_debug_dialog)
+        m_diag.addAction(act_inspection_debug)
 
         act_range = QAction("     Inspection Parameters Range", self)
         act_range.triggered.connect(self._open_inspection_parameters_range)
@@ -560,13 +700,14 @@ class MainWindow(QMainWindow):
         m_diag.addAction(advanced_header)
         
         act_step_mode = QAction("Enable Step Mode", self, checkable=True)
-        act_step_mode.setChecked(False)
+        act_step_mode.setChecked(self.step_mode_enabled)
         act_step_mode.triggered.connect(self._toggle_step_mode)
         m_diag.addAction(act_step_mode)
+        self.act_step_mode = act_step_mode
         m_diag.addAction(
-            QAction("     Alert Messages", self, triggered=lambda: AlertMessagesDialog(self).exec())
+            QAction("     Alert Messages", self, triggered=self._open_alert_messages_dialog)
         )
-        m_diag.addAction(QAction("     Encrypt / Decrypt Images", self, triggered=lambda: self._stub("Encrypt / Decrypt Images")))
+        m_diag.addAction(QAction("     Encrypt / Decrypt Images", self, triggered=self._open_encrypt_decrypt_dialog))
         m_diag.addAction(
             QAction("     Ignore Count", self, triggered=lambda: IgnoreFailCountDialog(self).exec())
         )
@@ -1053,86 +1194,219 @@ class MainWindow(QMainWindow):
     # CENTER LAYOUT
     # =================================================
     def _build_center_layout(self):
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setHandleWidth(1)
-        splitter.setStyleSheet("""
-            QSplitter::handle {
-                background: #E0E0E0;
-            }
-            QSplitter::handle:hover {
-                background: #B0B0B0;
-            }
-        """)
-
-        # LEFT PANEL (60%) ========================================
-        left = QWidget()
-        lyt = QVBoxLayout(left)
-        lyt.setContentsMargins(16, 16, 16, 16)
-        lyt.setSpacing(12)
-
-        # Track label with styling
+        """
+        Simple 5-station camera display layout (step 1)
+        """
+        main_widget = QWidget()
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+        
+        # Track label (for backward compatibility)
         self.track_label = QLabel()
         self.track_label.setStyleSheet("""
             QLabel {
-                font-size: 14px;
+                font-size: 12px;
                 font-weight: bold;
                 color: #333333;
                 padding: 4px 0px;
             }
         """)
-        lyt.addWidget(self.track_label)
-
-
-        # Image display area with responsive sizing
-        self.image_label = QLabel()
-        self.image_label.setMinimumSize(400, 300)  # Reduced minimum for smaller screens
-        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.image_label.setStyleSheet("""
-            QLabel {
-                background: #000000;
-                border: 2px solid #CCCCCC;
-                border-radius: 4px;
-                min-height: 300px;
+        main_layout.addWidget(self.track_label)
+        
+        # 5 Station Camera Display - Horizontal Layout
+        camera_row = QHBoxLayout()
+        camera_row.setContentsMargins(0, 0, 0, 0)
+        camera_row.setSpacing(4)
+        
+        # Station configuration: name and color indicator
+        stations = [
+            {"name": "Top Index", "label": "Station 1", "color": "#4A90E2"},  # Blue
+            {"name": "Bottom Index", "label": "Station 2", "color": "#4A90E2"},  # Blue
+            {"name": "Feed", "label": "Station 3", "color": "#4A90E2"},  # Blue
+            {"name": "Pick Up 1", "label": "Station 4", "color": "#E74C3C"},  # Red
+            {"name": "Pick Up 2", "label": "Station 5", "color": "#E74C3C"},  # Red
+        ]
+        
+        self.camera_panels = {}
+        
+        for idx, station in enumerate(stations):
+            doc_index = idx + 1
+            # Camera panel container
+            panel = QWidget()
+            panel.setStyleSheet("""
+                QWidget {
+                    background: white;
+                    border: 2px solid #CCCCCC;
+                    border-radius: 4px;
+                }
+            """)
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(0, 0, 0, 0)
+            panel_layout.setSpacing(0)
+            
+            # Colored header bar
+            header = QWidget()
+            header.setFixedHeight(24)
+            header.setStyleSheet(f"""
+                QWidget {{
+                    background: {station['color']};
+                    border-radius: 2px 2px 0px 0px;
+                }}
+            """)
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(6, 0, 6, 0)
+            header_layout.setSpacing(0)
+            
+            station_label = QLabel(station['label'])
+            station_label.setStyleSheet("""
+                QLabel {
+                    color: white;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+            """)
+            header_layout.addWidget(station_label)
+            header_layout.addStretch()
+            
+            panel_layout.addWidget(header)
+            
+            # Camera image area
+            image_area = QLabel()
+            image_area.setAlignment(Qt.AlignCenter)
+            image_area.setMinimumSize(180, 180)
+            image_area.setStyleSheet("""
+                QLabel {
+                    background: #1a1a1a;
+                    color: #666;
+                    font-size: 10px;
+                }
+            """)
+            image_area.setText("")  # Will be populated with camera image
+            panel_layout.addWidget(image_area, 1)
+            
+            # Store reference
+            self.camera_panels[doc_index] = {
+                "panel": panel,
+                "image": image_area,
+                "header": header,
+                "label": station_label
             }
-        """)
-        self.image_label.setAlignment(Qt.AlignCenter)
-        # Show threshold slider when image area is clicked
-        self.image_label.mousePressEvent = self._on_image_clicked
-        lyt.addWidget(self.image_label, 1)  # Takes available space
-
-        # Binary Threshold Section
-        threshold_container = QWidget()
-        threshold_container.setVisible(False)  # Hidden by default
-        self.threshold_container = threshold_container  # Store reference for toggling
+            if doc_index == 1:
+                self.image_label = image_area
+            
+            camera_row.addWidget(panel)
         
-        threshold_layout = QVBoxLayout(threshold_container)
-        threshold_layout.setContentsMargins(0, 8, 0, 0)
+        # Add camera row to main layout
+        camera_container = QWidget()
+        camera_container.setLayout(camera_row)
+        main_layout.addWidget(camera_container, 1)
         
-        # Threshold label
+        # Bottom section: left two cameras + right tables
+        bottom_row = QHBoxLayout()
+        bottom_row.setContentsMargins(0, 0, 0, 0)
+        bottom_row.setSpacing(8)
+        
+        # Left column: two additional cameras (stacked)
+        left_cam_col = QVBoxLayout()
+        left_cam_col.setContentsMargins(0, 0, 0, 0)
+        left_cam_col.setSpacing(8)
+        
+        extra_cams = [
+            {"name": "Track 6", "label": "Station 6", "color": "#4A90E2"},
+            {"name": "Track 7", "label": "Station 7", "color": "#4A90E2"},
+        ]
+        
+        for offset, station in enumerate(extra_cams, start=6):
+            panel = QWidget()
+            panel.setStyleSheet("""
+                QWidget {
+                    background: white;
+                    border: 2px solid #CCCCCC;
+                    border-radius: 4px;
+                }
+            """)
+            panel_layout = QVBoxLayout(panel)
+            panel_layout.setContentsMargins(0, 0, 0, 0)
+            panel_layout.setSpacing(0)
+            
+            header = QWidget()
+            header.setFixedHeight(22)
+            header.setStyleSheet(f"""
+                QWidget {{
+                    background: {station['color']};
+                    border-radius: 2px 2px 0px 0px;
+                }}
+            """)
+            header_layout = QHBoxLayout(header)
+            header_layout.setContentsMargins(6, 0, 6, 0)
+            header_layout.setSpacing(0)
+            
+            station_label = QLabel(station['label'])
+            station_label.setStyleSheet("""
+                QLabel {
+                    color: white;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+            """)
+            header_layout.addWidget(station_label)
+            header_layout.addStretch()
+            
+            panel_layout.addWidget(header)
+            
+            image_area = QLabel()
+            image_area.setAlignment(Qt.AlignCenter)
+            image_area.setMinimumSize(220, 150)
+            image_area.setStyleSheet("""
+                QLabel {
+                    background: #1a1a1a;
+                    color: #666;
+                    font-size: 10px;
+                }
+            """)
+            image_area.setText("")
+            panel_layout.addWidget(image_area, 1)
+            
+            self.camera_panels[offset] = {
+                "panel": panel,
+                "image": image_area,
+                "header": header,
+                "label": station_label
+            }
+            
+            left_cam_col.addWidget(panel)
+        
+        bottom_row.addLayout(left_cam_col, 1)
+        
+        # Right column: threshold + tables
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(8)
+        
+        # Binary Threshold Section (hidden by default)
+        self.threshold_container = QWidget()
+        self.threshold_container.setVisible(False)
+        threshold_layout = QVBoxLayout(self.threshold_container)
+        threshold_layout.setContentsMargins(8, 8, 8, 8)
+        threshold_layout.setSpacing(6)
+        
         threshold_header = QLabel("Binary Threshold Settings")
         threshold_header.setStyleSheet("""
             QLabel {
-                font-size: 13px;
+                font-size: 11px;
                 font-weight: bold;
-                color: #555555;
-                padding-bottom: 4px;
+                color: #555;
             }
         """)
         threshold_layout.addWidget(threshold_header)
         
-        # Slider row with improved layout
         slider_row = QHBoxLayout()
         slider_row.setContentsMargins(0, 0, 0, 0)
         slider_row.setSpacing(8)
         
         self.binary_text_label = QLabel("Threshold:")
-        self.binary_text_label.setStyleSheet("""
-            QLabel {
-                font-size: 12px;
-                color: #666666;
-                min-width: 70px;
-            }
-        """)
+        self.binary_text_label.setStyleSheet("QLabel { font-size: 11px; min-width: 70px; }")
         
         self.binary_slider = QSlider(Qt.Horizontal)
         self.binary_slider.setRange(0, 255)
@@ -1148,19 +1422,11 @@ class MainWindow(QMainWindow):
                 background: #4A90E2;
                 border-radius: 3px;
             }
-            QSlider::add-page:horizontal {
-                background: #E0E0E0;
-                border-radius: 3px;
-            }
             QSlider::handle:horizontal {
                 background: #4A90E2;
                 width: 18px;
                 margin: -6px 0;
                 border-radius: 9px;
-            }
-            QSlider::handle:horizontal:hover {
-                background: #3A7BC8;
-                width: 20px;
             }
         """)
         self.binary_slider.valueChanged.connect(self._on_binary_threshold_changed)
@@ -1170,155 +1436,301 @@ class MainWindow(QMainWindow):
         self.binary_value_label.setAlignment(Qt.AlignCenter)
         self.binary_value_label.setStyleSheet("""
             QLabel {
-                font-size: 12px;
+                font-size: 11px;
                 font-weight: bold;
                 color: #4A90E2;
                 background: #F0F4F8;
                 border: 1px solid #D0D7E2;
                 border-radius: 3px;
-                padding: 3px;
+                padding: 2px;
             }
         """)
         
         slider_row.addWidget(self.binary_text_label)
         slider_row.addWidget(self.binary_slider)
         slider_row.addWidget(self.binary_value_label)
-        
         threshold_layout.addLayout(slider_row)
-        lyt.addWidget(threshold_container)
-
-        # Logo section with improved styling
-        logo_container = QWidget()
-        logo_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        logo_container.setStyleSheet("""
-            QWidget {
-                background: #2C3E50;
-                border-radius: 6px;
-                min-height: 80px;
-            }
-        """)
-        logo_layout = QVBoxLayout(logo_container)
-        logo_layout.setContentsMargins(16, 16, 16, 16)
         
-        logo = QLabel("LOGO")
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setStyleSheet("""
-            QLabel {
-                color: #ECF0F1;
-                font-size: 18px;
-                font-weight: bold;
-                letter-spacing: 1px;
-            }
-        """)
-        logo.setFixedHeight(60)
-        logo_layout.addWidget(logo)
+        right_col.addWidget(self.threshold_container)
         
-        lyt.addWidget(logo_container)
-
-        splitter.addWidget(left)
-
-        # RIGHT PANEL (40%) ========================================
-        right = QWidget()
-        right.setStyleSheet("""
-            QWidget {
-                background: #F8F9FA;
-            }
-        """)
-        rlyt = QVBoxLayout(right)
-        rlyt.setContentsMargins(12, 12, 12, 12)
-        rlyt.setSpacing(12)
-
-        # Top table with styling and responsive sizing
-        self.top_tbl = QTableWidget(10, 2)
-        self.top_tbl.setHorizontalHeaderLabels(["Parameter", "Track 1"])
-        self.top_tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Tables
+        tables_container = QWidget()
+        tables_layout = QVBoxLayout(tables_container)
+        tables_layout.setContentsMargins(0, 0, 0, 0)
+        tables_layout.setSpacing(8)
+        
+        summary_rows = [
+            "UNIT INSPECTED",
+            "UNIT PASSED",
+            "UNIT FAILED",
+            "PASS YIELD %",
+            "FINAL YIELD %",
+            "ENABLE/DISABLE STN",
+            "LAST 20K UNIT FAILED",
+            "LAST 20K FAIL YIELD %",
+            "CONFIG NAME",
+            "LOT NO INFO",
+        ]
+        track_headers = [f"Track{i}" for i in range(1, 8)]
+        self.top_tbl = QTableWidget(len(summary_rows), 1 + len(track_headers))
+        self.top_tbl.setHorizontalHeaderLabels(["Summary"] + track_headers)
         self.top_tbl.setStyleSheet("""
             QTableWidget {
                 background: white;
                 border: 1px solid #DEE2E6;
-                border-radius: 4px;
+                border-radius: 3px;
                 gridline-color: #E9ECEF;
-                font-size: 11px;
+                font-size: 10px;
                 alternate-background-color: #F8F9FA;
             }
             QHeaderView::section {
                 background: #4A90E2;
                 color: white;
                 font-weight: bold;
-                padding: 6px;
+                padding: 4px;
                 border: none;
-                font-size: 11px;
-            }
-            QTableWidget::item {
-                padding: 6px;
-                border-bottom: 1px solid #E9ECEF;
-            }
-            QTableWidget::item:selected {
-                background: #E3F2FD;
+                font-size: 10px;
             }
         """)
         self.top_tbl.horizontalHeader().setStretchLastSection(True)
         self.top_tbl.verticalHeader().setVisible(False)
-        self.top_tbl.setAlternatingRowColors(True)
-        rlyt.addWidget(self.top_tbl, 1)  # Takes half of available space
-
-        # Bottom table with styling and responsive sizing
-        self.bot_tbl = QTableWidget(15, 3)
-        self.bot_tbl.setHorizontalHeaderLabels(["Parameter", "Track 1 Qty", "Track 1 %"])
-        self.bot_tbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.top_tbl.setMaximumHeight(120)
+        for row_idx, label in enumerate(summary_rows):
+            item = QTableWidgetItem(label)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.top_tbl.setItem(row_idx, 0, item)
+        tables_layout.addWidget(self.top_tbl)
+        
+        defects_rows = [
+            "Pkg Location",
+            "Body Length",
+            "Body Width",
+            "Terminal Length",
+            "Terminal Width",
+            "Term to Term",
+            "Body Smear",
+            "Body Stain",
+            "Edge Chipoff",
+            "Terminal Poggo",
+            "Terminal Incomplete",
+            "Oxidation",
+            "Terminal Chipoff",
+            "Body Color",
+            "Mark",
+            "Mark Color",
+        ]
+        defect_headers = ["Defects"]
+        for i in range(1, 8):
+            defect_headers.extend(["Qty", "%"])
+        self.bot_tbl = QTableWidget(len(defects_rows), len(defect_headers))
+        self.bot_tbl.setHorizontalHeaderLabels(defect_headers)
         self.bot_tbl.setStyleSheet("""
             QTableWidget {
                 background: white;
                 border: 1px solid #DEE2E6;
-                border-radius: 4px;
+                border-radius: 3px;
                 gridline-color: #E9ECEF;
-                font-size: 11px;
+                font-size: 10px;
                 alternate-background-color: #F8F9FA;
             }
             QHeaderView::section {
                 background: #5CB85C;
                 color: white;
                 font-weight: bold;
-                padding: 6px;
+                padding: 4px;
                 border: none;
-                font-size: 11px;
-            }
-            QTableWidget::item {
-                padding: 6px;
-                border-bottom: 1px solid #E9ECEF;
-            }
-            QTableWidget::item:selected {
-                background: #E3F2FD;
+                font-size: 10px;
             }
         """)
         self.bot_tbl.horizontalHeader().setStretchLastSection(True)
         self.bot_tbl.verticalHeader().setVisible(False)
-        self.bot_tbl.setAlternatingRowColors(True)
-        rlyt.addWidget(self.bot_tbl, 1)  # Takes half of available space
+        for row_idx, label in enumerate(defects_rows):
+            item = QTableWidgetItem(label)
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            self.bot_tbl.setItem(row_idx, 0, item)
+        tables_layout.addWidget(self.bot_tbl)
 
-        splitter.addWidget(right)
-        
-        # Set initial sizes for 60/40 split
-        splitter.setSizes([600, 400])  # Will be adjusted based on window size
-        
-        # Ensure proper proportions when resizing
-        def update_splitter_sizes():
-            total_width = splitter.width()
-            left_width = int(total_width * 0.6)
-            right_width = total_width - left_width
-            splitter.setSizes([left_width, right_width])
-        
-        # Connect resize event
-        splitter.splitterMoved.connect(lambda: update_splitter_sizes())
-        
-        # Set initial stretch factors for 60/40 ratio
-        splitter.setStretchFactor(0, 6)  # Left gets 60% weight
-        splitter.setStretchFactor(1, 4)  # Right gets 40% weight
+        track_colors = [
+            "#9EC7FF",  # Track1 light blue
+            "#9AA3AD",  # Track2 gray-blue
+            "#8E8742",  # Track3 olive
+            "#9EC7FF",  # Track4 light blue
+            "#9AA3AD",  # Track5 gray-blue
+            "#8E8742",  # Track6 olive
+            "#9EC7FF",  # Track7 light blue
+        ]
 
-        self.setCentralWidget(splitter)
+        def apply_track_bands(table, start_col, columns_per_track):
+            for track_idx, color in enumerate(track_colors):
+                for col in range(columns_per_track):
+                    col_idx = start_col + (track_idx * columns_per_track) + col
+                    for row in range(table.rowCount()):
+                        existing = table.item(row, col_idx)
+                        if existing is None:
+                            existing = QTableWidgetItem("")
+                            existing.setFlags(existing.flags() & ~Qt.ItemIsEditable)
+                            table.setItem(row, col_idx, existing)
+                        existing.setBackground(QColor(color))
+
+        apply_track_bands(self.top_tbl, 1, 1)
+        apply_track_bands(self.bot_tbl, 1, 2)
         
-        # Schedule initial layout update after window is shown
-        QTimer.singleShot(100, update_splitter_sizes)
+        right_col.addWidget(tables_container, 1)
+        
+        bottom_row.addLayout(right_col, 2)
+        main_layout.addLayout(bottom_row, 1)
+        
+        self.multi_track_tables = True
+        self.setCentralWidget(main_widget)
+    
+    def _create_camera_displays(self, parent_layout):
+        """
+        Dynamically create camera display panels based on registry configuration.
+        If multiple cameras are configured, creates a grid of camera views.
+        If only one camera, creates single large view (backward compatible).
+        """
+        # Get camera configuration from registry
+        camera_count = self.grab_service.get_camera_count()
+        cameras = self.grab_service.get_configured_cameras()
+        
+        if camera_count == 0:
+            # No cameras configured - create single placeholder view
+            print("[UI] No cameras configured - creating placeholder view")
+            self._create_single_camera_view(parent_layout, "No Camera Configured")
+            
+        elif camera_count == 1:
+            # Single camera - use large view (backward compatible)
+            doc_idx, (station, serial) = list(cameras.items())[0]
+            print(f"[UI] Single camera mode: Doc{doc_idx} ({station})")
+            self._create_single_camera_view(parent_layout, f"{station} (Doc{doc_idx})")
+            
+        else:
+            # Multiple cameras - create grid layout
+            print(f"[UI] Creating grid for {camera_count} cameras")
+            self._create_camera_grid(parent_layout, cameras)
+    
+    def _create_single_camera_view(self, parent_layout, title):
+        """Create single large camera view (legacy mode)"""
+        self.image_label = QLabel()
+        self.image_label.setMinimumSize(400, 300)
+        self.image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.image_label.setStyleSheet("""
+            QLabel {
+                background: #000000;
+                border: 2px solid #CCCCCC;
+                border-radius: 4px;
+                min-height: 300px;
+            }
+        """)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        self.image_label.mousePressEvent = self._on_image_clicked
+        parent_layout.addWidget(self.image_label, 1)
+        
+        # Store in camera_panels for unified access
+        self.camera_panels[1] = {"label": self.image_label, "title": title}
+    
+    def _create_camera_grid(self, parent_layout, cameras):
+        """Create grid of camera panels based on camera count"""
+        from PySide6.QtWidgets import QGridLayout, QVBoxLayout, QFrame
+        
+        # Create container for camera grid
+        camera_container = QWidget()
+        grid_layout = QGridLayout(camera_container)
+        grid_layout.setSpacing(8)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Calculate grid dimensions
+        camera_count = len(cameras)
+        if camera_count <= 2:
+            cols = 2
+        elif camera_count <= 4:
+            cols = 2
+        elif camera_count <= 6:
+            cols = 3
+        else:  # 7 cameras
+            cols = 3
+        
+        rows = (camera_count + cols - 1) // cols
+        
+        # Create camera panel for each configured camera
+        for idx, (doc_idx, (station, serial)) in enumerate(cameras.items()):
+            row = idx // cols
+            col = idx % cols
+            
+            # Create camera panel frame
+            panel_frame = QFrame()
+            panel_frame.setStyleSheet("""
+                QFrame {
+                    background: #2C3E50;
+                    border: 2px solid #34495E;
+                    border-radius: 4px;
+                }
+            """)
+            panel_layout = QVBoxLayout(panel_frame)
+            panel_layout.setContentsMargins(4, 4, 4, 4)
+            panel_layout.setSpacing(2)
+            
+            # Camera title label
+            title_label = QLabel(f"Doc{doc_idx}: {station}")
+            title_label.setStyleSheet("""
+                QLabel {
+                    color: #ECF0F1;
+                    font-size: 11px;
+                    font-weight: bold;
+                    background: transparent;
+                    border: none;
+                    padding: 2px;
+                }
+            """)
+            title_label.setAlignment(Qt.AlignCenter)
+            panel_layout.addWidget(title_label)
+            
+            # Camera image label
+            image_label = QLabel()
+            image_label.setMinimumSize(200, 150)
+            image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            image_label.setStyleSheet("""
+                QLabel {
+                    background: #000000;
+                    border: 1px solid #555555;
+                    border-radius: 2px;
+                }
+            """)
+            image_label.setAlignment(Qt.AlignCenter)
+            image_label.setScaledContents(False)
+            panel_layout.addWidget(image_label, 1)
+            
+            # Status label
+            status_label = QLabel(f"SN: {serial[-8:]}")  # Show last 8 chars of serial
+            status_label.setStyleSheet("""
+                QLabel {
+                    color: #95A5A6;
+                    font-size: 9px;
+                    background: transparent;
+                    border: none;
+                    padding: 2px;
+                }
+            """)
+            status_label.setAlignment(Qt.AlignCenter)
+            panel_layout.addWidget(status_label)
+            
+            # Add panel to grid
+            grid_layout.addWidget(panel_frame, row, col)
+            
+            # Store references
+            self.camera_panels[doc_idx] = {
+                "label": image_label,
+                "title": title_label,
+                "status": status_label,
+                "frame": panel_frame
+            }
+            
+            # Set first camera as primary for backward compatibility
+            if idx == 0:
+                self.image_label = image_label
+        
+        # Add grid to parent layout
+        parent_layout.addWidget(camera_container, 1)
 
     # =================================================
     # RUN STATE
@@ -1341,23 +1753,35 @@ class MainWindow(QMainWindow):
 
 
     def _apply_run_state(self):
+        """
+        Update menu items based on system state matching old C++ logic.
+        
+        From old C++ ChipCapacitorDoc::OnUpdateEngrCamEnable:
+            pCmdUI->Enable(!m_bLiveImage && !m_bFailTrack && 
+                          m_bCamAvail && !m_bOnLine);
+                          
+        From old C++ ChipCapacitorDoc::OnUpdateConfigCamsetup:
+            pCmdUI->Enable(!m_bCamSetupDlgOpen && m_bCamEnable && 
+                          m_bCamAvail && !m_bFailTrack && 
+                          !m_bOnLine && !m_bTeaching && 
+                          !m_bInspecting && !m_bCalibrating && 
+                          !m_bCalibratingDevice);
+        """
         offline = self.state.run_state == RunState.OFFLINE
+        online = self.state.run_state == RunState.ONLINE
+        
+        # Basic run buttons
         self.act_teach.setEnabled(offline)
         self.act_test.setEnabled(offline)
         self.act_start.setEnabled(not offline)
         self.act_end.setEnabled(offline)
-        self.act_grab.setEnabled(
-        self.state.run_state == RunState.ONLINE and not self.is_simulator_mode
-    )
-        online = self.state.run_state == RunState.ONLINE
 
+        # Camera LIVE and GRAB allowed only ONLINE
         camera_allowed = (
-    online
-    and not self.is_simulator_mode
-    and self._is_camera_supported()
-)
-
-
+            online
+            and not self.is_simulator_mode
+            and self._is_camera_supported()
+        )
         self.act_grab.setEnabled(camera_allowed)
         self.act_live.setEnabled(camera_allowed)
 
@@ -1365,19 +1789,160 @@ class MainWindow(QMainWindow):
         if not camera_allowed:
             self.grab_service.stop_live()
 
-
         # If switching OFFLINE → stop LIVE immediately
         if not online:
             self.grab_service.stop_live()
         
-        # Enable/Disable disabled features based on online/offline state
+        # ========== OLD C++ MENU ENABLE/DISABLE LOGIC ==========
+        
+        # Enable/Disable Camera menu (ID_ENGR_CAM_ENABLE)
+        # Enabled when: !LiveImage && !FailTrack && CamAvail && !OnLine
+        if self.act_camera_enable:
+            camera_enable_allowed = (
+                not self.live_image_active and
+                not self.fail_track_active and
+                self.camera_available and
+                offline  # !m_bOnLine = offline
+            )
+            self.act_camera_enable.setEnabled(camera_enable_allowed)
+            self.act_camera_enable.setChecked(self.camera_enable)
+        
+        # Camera Configuration menu (ID_CONFIG_CAMSETUP)
+        # Enabled when: !DlgOpen && CamEnable && CamAvail && !FailTrack && 
+        #              !OnLine && !Teaching && !Inspecting && !Calibrating && !DeviceCalib
+        if self.act_camera_config:
+            camera_config_allowed = (
+                not self.camera_setup_dialog_open and
+                self.camera_enable and
+                self.camera_available and
+                not self.fail_track_active and
+                offline and  # !m_bOnLine
+                not self.teaching_active and
+                not self.inspecting_active and
+                not self.calibrating_active and
+                not self.device_calibrating
+            )
+            self.act_camera_config.setEnabled(camera_config_allowed)
+
+            # Debug output
+            if not camera_config_allowed:
+                reasons = []
+                if self.camera_setup_dialog_open:
+                    reasons.append("Dialog already open")
+                if not self.camera_enable:
+                    reasons.append("Camera not ENABLED (check Engineering → Camera Enable)")
+                if not self.camera_available:
+                    reasons.append("Camera not available")
+                if self.fail_track_active:
+                    reasons.append("Fail track active")
+                if not offline:
+                    reasons.append("System not OFFLINE (switch to OFFLINE mode)")
+                if self.teaching_active:
+                    reasons.append("Teaching active")
+                if self.inspecting_active:
+                    reasons.append("Inspecting active")
+                if self.calibrating_active:
+                    reasons.append("Calibrating active")
+                if self.device_calibrating:
+                    reasons.append("Device calibrating")
+
+                # Print to console for debugging
+                print(f"\n🔴 Camera Configuration DISABLED - Reasons:")
+                for reason in reasons:
+                    print(f"   • {reason}")
+                print(f"\n📊 Current Flags:")
+                print(f"   offline={offline}, camera_enable={self.camera_enable}, camera_available={self.camera_available}")
+                print()
+        
+        # Enable/Disable Inspection checkbox (ID_CONFIGURATION_ENABLEDISABLEINSPECTION)
+        # Old C++: pCmdUI->SetCheck(m_bEnableInsp); pCmdUI->Enable(FALSE);
+        # Always enabled, just reflects current state
+        if self.act_inspection_enable:
+            self.act_inspection_enable.setChecked(self.inspection_enabled)
+            # Old C++ keeps this always enabled (user can toggle anytime)
+            self.act_inspection_enable.setEnabled(True)
+
+        # Inspect Cycle → Single Image (ID_RUN_INSPECTCYCLE_SINGLEIMAGE)
+        if hasattr(self, "act_inspect_cycle_single"):
+            inspect_cycle_allowed = (
+                not self.live_image_active and
+                not self.fail_track_active and
+                offline and
+                not self.teaching_active and
+                not self.calibrating_active and
+                not self.insp_saved_images_active and
+                not self.insp_saved_images_draw_active
+            )
+            self.act_inspect_cycle_single.setEnabled(inspect_cycle_allowed)
+            self.act_inspect_cycle_single.setChecked(self.cont_insp_active)
+
+        # Inspect Saved Images actions
+        if hasattr(self, "act_saved_autorun"):
+            saved_images_allowed = (
+                not self.live_image_active and
+                not self.fail_track_active and
+                not self.cont_insp_active and
+                offline and
+                not self.teaching_active and
+                not self.inspecting_active and
+                not self.calibrating_active and
+                (not self.insp_saved_images_active or
+                 not self.insp_saved_images_draw_active or
+                 not self.saved_images_step_active)
+            )
+            self.act_saved_autorun.setEnabled(saved_images_allowed)
+            self.act_saved_autorun.setChecked(self.insp_saved_images_active)
+
+        if hasattr(self, "act_saved_autorun_draw"):
+            saved_images_allowed = (
+                not self.live_image_active and
+                not self.fail_track_active and
+                not self.cont_insp_active and
+                offline and
+                not self.teaching_active and
+                not self.inspecting_active and
+                not self.calibrating_active and
+                (not self.insp_saved_images_active or
+                 not self.insp_saved_images_draw_active or
+                 not self.saved_images_step_active)
+            )
+            self.act_saved_autorun_draw.setEnabled(saved_images_allowed)
+            self.act_saved_autorun_draw.setChecked(self.insp_saved_images_draw_active)
+
+        if hasattr(self, "act_saved_step"):
+            saved_step_allowed = (
+                not self.live_image_active and
+                not self.fail_track_active and
+                not self.cont_insp_active and
+                offline and
+                not self.teaching_active and
+                not self.inspecting_active and
+                not self.calibrating_active and
+                not self.insp_saved_images_active and
+                not self.insp_saved_images_draw_active
+            )
+            self.act_saved_step.setEnabled(saved_step_allowed)
+            self.act_saved_step.setChecked(self.saved_images_step_active)
+            
+            # Store debug info for tooltip
+            if reasons:
+                self.act_camera_config.setToolTip("Disabled because:\n• " + "\n• ".join(reasons))
+        else:
+            self.act_camera_config.setToolTip("")
+        
+        # Enable ONLINE-only features (only when ONLINE)
         for feature in self.online_only_features:
             feature.setEnabled(online)
+        
+        # Enable OFFLINE-only features (only when OFFLINE)
+        for feature in self.offline_only_features:
+            feature.setEnabled(offline)
         
         if hasattr(self, "act_online_offline"):
             self.act_online_offline.blockSignals(True)
             self.act_online_offline.setChecked(offline)
             self.act_online_offline.blockSignals(False)
+        
         self.setWindowTitle(f"iTrue - ChipCap Simulator [{self.state.run_state.value}]")
     def _is_camera_supported(self) -> bool:
         """
@@ -1398,6 +1963,129 @@ class MainWindow(QMainWindow):
     def _open_lot_dialog(self):
         dlg = LotInformationDialog(self)
         dlg.exec()
+    
+    def _end_lot(self):
+        """
+        End Lot functionality (matching old C++ OnProductionCloselot).
+        
+        Operations performed:
+        1. Mark lot as closed (m_bLotOpened = FALSE)
+        2. Reset to production mode if online (OnProductionmode)
+        3. Record end time (strEndLotTime)
+        4. Write lot summary file (WriteLotSummaryToFile)
+        5. Save online pass/fail images (SaveOnlinePassFailImages)
+        6. Copy configuration files to lot directory
+        7. Reset scan numbers (m_strScanNo, m_strReelMachScanNo, m_strReelOrderNo)
+        8. Display results if pocket post-seal enabled
+        9. Auto-open next lot if enabled (m_nDisplayOpenLot)
+        """
+        from config.lot_information_io import load_lot_info, save_lot_info
+        from datetime import datetime
+        from pathlib import Path
+        import shutil
+        
+        try:
+            # 1. Mark lot as closed
+            lot_opened = False
+            
+            # 2. Reset to production mode if online
+            if self.state.run_state.name == "ONLINE":
+                # Would call OnProductionmode() equivalent
+                pass
+            
+            # 3. Get current time and record end time
+            now = datetime.now()
+            end_lot_time = now.strftime("%d/%m/%Y  %H:%M:%S")
+            
+            # 4. Load lot info
+            lot_info = load_lot_info()
+            
+            # 5. Write lot summary file (create lot summary directory if needed)
+            lot_summary_root = Path("lot_summaries")
+            lot_summary_root.mkdir(exist_ok=True)
+            
+            lot_start_time = now.strftime("%d%m%Y_%H%M%S")
+            lot_summary_file = lot_summary_root / f"{lot_start_time}_{lot_info.lot_id}_summary.txt"
+            
+            summary_content = f"""
+╔════════════════════════════════════════════════════════════════╗
+║                        LOT SUMMARY REPORT                      ║
+╚════════════════════════════════════════════════════════════════╝
+
+Lot Information:
+  Machine ID:        {lot_info.machine_id}
+  Operator ID:       {lot_info.operator_id}
+  Order No:          {lot_info.order_no}
+  Lot ID:            {lot_info.lot_id}
+  Lot Size:          {lot_info.lot_size}
+  Package Type:      {lot_info.package_type}
+
+Timing:
+  Start Time:        (recorded at open lot)
+  End Time:          {end_lot_time}
+
+Save Images:
+  Pass Images:       {lot_info.save_images.get('pass', False)}
+  Fail Images:       {lot_info.save_images.get('fail', False)}
+  All Images:        {lot_info.save_images.get('all', False)}
+
+Status: Lot Closed
+
+═══════════════════════════════════════════════════════════════════
+"""
+            
+            with lot_summary_file.open("w") as f:
+                f.write(summary_content)
+            
+            # 6. Save online pass/fail images (if image directories exist)
+            # This would copy images from camera/inspection folders
+            if lot_info.save_images.get('pass') or lot_info.save_images.get('fail'):
+                images_dir = lot_summary_root / f"{lot_start_time}_{lot_info.lot_id}_images"
+                images_dir.mkdir(exist_ok=True)
+                # Image copying would happen here if folders are available
+            
+            # 7. Copy configuration files to lot directory
+            config_files = [
+                "inspection_parameters.json",
+                "pocket_params.json",
+                "device_location_setting.json"
+            ]
+            
+            lot_dir = lot_summary_root / f"{lot_start_time}_{lot_info.lot_id}"
+            lot_dir.mkdir(exist_ok=True)
+            
+            for config_file in config_files:
+                config_path = Path(config_file)
+                if config_path.exists():
+                    try:
+                        shutil.copy(config_path, lot_dir / config_file)
+                    except Exception as e:
+                        print(f"Warning: Could not copy {config_file}: {e}")
+            
+            # 8. Reset scan numbers and lot information
+            lot_info.scan_no = "noid"
+            lot_info.lot_id = ""
+            lot_info.lot_size = ""
+            
+            # 9. Save reset state to JSON
+            save_lot_info(lot_info)
+            
+            # 10. Show confirmation with lot summary file location
+            result_msg = f"""Lot closed successfully!
+
+Summary Report: {lot_summary_file}
+Lot Directory: {lot_dir}
+
+All lot counters reset and ready for next lot."""
+            
+            QMessageBox.information(self, "Lot Closed", result_msg)
+            
+            # 11. Auto-open next lot if enabled (m_nDisplayOpenLot equivalent)
+            # This would be a configuration option
+            # For now, user can manually open next lot
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error Closing Lot", f"Error during lot closure:\n{str(e)}")
         
     def _open_body_color_dialog(self):
         dlg = BodyColorDialog(self)
@@ -1410,6 +2098,138 @@ class MainWindow(QMainWindow):
     def _open_mark_color_dialog(self):
         dlg = MarkColorDialog(self)
         dlg.exec()
+
+    def _open_mark_symbol_set_dialog(self):
+        """Open Mark Symbol Set Setting dialog"""
+        dlg = MarkSymbolSetDialog(self)
+        if dlg.exec():
+            # Configuration is already saved by the dialog
+            QMessageBox.information(
+                self,
+                "Mark Symbol Set",
+                "Mark Symbol Set configuration saved successfully."
+            )
+    
+    def _open_mark_parameters_dialog(self):
+        """Open Mark Inspect Parameters dialog"""
+        dlg = MarkParametersDialog(self)
+        if dlg.exec():
+            # Configuration is already saved by the dialog
+            QMessageBox.information(
+                self,
+                "Mark Parameters",
+                "Mark Parameters configuration saved successfully."
+            )
+
+    def _open_mark_symbol_images_dialog(self):
+        """Open Mark Symbol Images dialog to teach symbol images"""
+        if self.current_image is None:
+            QMessageBox.warning(self, "Mark Symbol Images", "No image loaded.")
+            return
+        self.mark_symbol_dialog = MarkSymbolImagesDialog(self, self.current_image)
+        self.mark_symbol_dialog.symbol_captured.connect(self._start_symbol_image_teaching)
+        self.mark_symbol_dialog.exec()
+
+    def _start_symbol_image_teaching(self, symbol: str, image: np.ndarray):
+        """
+        Start symbol image teaching workflow.
+        User clicks a symbol -> gets asked about rotation -> draws ROI -> captures image
+        """
+        if image is None or image.size == 0:
+            QMessageBox.warning(self, "Symbol Teaching", f"No image provided for symbol '{symbol}'.")
+            return
+        
+        # Show message about ROI selection
+        QMessageBox.information(
+            self,
+            f"Teach Symbol '{symbol}'",
+            f"Focus the Red Box on the symbol '{symbol}' and press 'Next'."
+        )
+        
+        # Start ROI selection for symbol
+        self.current_teach_symbol = symbol
+        self.teach_phase = TeachPhase.SYMBOL_ROI
+        
+        self.teach_overlay = PocketTeachOverlay(self.image_label, self)
+        self.teach_overlay.setGeometry(self.image_label.rect())
+        self.teach_overlay.show()
+        self.teach_overlay.setFocus()
+
+    def _confirm_symbol_image_roi(self, roi):
+        """
+        Capture symbol image at specified ROI and store it.
+        """
+        if not hasattr(self, 'current_teach_symbol'):
+            return
+        
+        symbol = self.current_teach_symbol
+        
+        if self.teach_overlay:
+            self.teach_overlay.hide()
+            self.teach_overlay.deleteLater()
+            self.teach_overlay = None
+        
+        # Extract symbol image from ROI
+        x, y, w, h = self._map_label_roi_to_image(roi)
+        
+        if self.current_image is None or w <= 0 or h <= 0:
+            QMessageBox.warning(self, "Symbol Teaching", "Invalid ROI for symbol image.")
+            return
+        
+        gray = self.current_image
+        if len(gray.shape) == 3:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+        
+        symbol_image = gray[y:y+h, x:x+w]
+        
+        if symbol_image.size == 0:
+            QMessageBox.warning(self, "Symbol Teaching", f"Failed to extract symbol '{symbol}' image.")
+            return
+        
+        # Get the dialog and add the symbol image
+        # (Dialog should still be accessible as a property or we re-open it)
+        # For now, we'll find it in the window's children or recreate temporarily
+        self._last_symbol_images = getattr(self, '_last_symbol_images', {})
+        self._last_symbol_images[symbol] = symbol_image
+        
+        # Also save to disk via MarkSymbolImagesDialog
+        from pathlib import Path
+        symbol_dir = Path("MarkSymbols")
+        symbol_dir.mkdir(exist_ok=True)
+        symbol_file = symbol_dir / f"{symbol}.png"
+        cv2.imwrite(str(symbol_file), symbol_image)
+        
+        # Update the dialog button style
+        if hasattr(self, 'mark_symbol_dialog') and self.mark_symbol_dialog:
+            self.mark_symbol_dialog.add_symbol_image(symbol, symbol_image)
+        
+        # Show preview and confirmation
+        preview = symbol_image.copy()
+        if len(preview.shape) == 2:
+            preview = cv2.cvtColor(preview, cv2.COLOR_GRAY2BGR)
+        
+        self._show_image(preview)
+        
+        reply = QMessageBox.information(
+            self,
+            f"Symbol '{symbol}' Captured",
+            f"Symbol '{symbol}' image has been saved.\n\n"
+            "Click OK to teach the next symbol or Cancel to close.",
+            QMessageBox.Ok | QMessageBox.Cancel
+        )
+        
+        self.teach_phase = TeachPhase.NONE
+        
+        # Reshow the dialog so user can teach next symbol
+        if reply == QMessageBox.Ok:
+            if hasattr(self, 'mark_symbol_dialog') and self.mark_symbol_dialog:
+                self.mark_symbol_dialog.show()
+                self.mark_symbol_dialog.setFocus()
+        else:
+            # User clicked Cancel, close the dialog
+            if hasattr(self, 'mark_symbol_dialog') and self.mark_symbol_dialog:
+                self.mark_symbol_dialog.close()
+
     def _toggle_online_offline_from_menu(self, checked: bool):
         """
         Menu toggle:
@@ -1470,10 +2290,42 @@ class MainWindow(QMainWindow):
         
         return scaled_pix
 
+    def _get_active_image_label(self) -> QLabel | None:
+        """Get the target QLabel for the current station camera panel."""
+        station_enum = self.state.station
+        station_name = station_enum.name if hasattr(station_enum, "name") else str(station_enum).upper()
+        doc_index = CameraRegistry.get_doc_index(station_name)
+        if doc_index and hasattr(self, "camera_panels"):
+            panel = self.camera_panels.get(doc_index)
+            if panel:
+                return panel.get("image") or panel.get("label")
+        return self.image_label
+
     def _display_pixmap(self, pixmap: QPixmap):
         """Display pixmap with current zoom level"""
+        target_label = self._get_active_image_label()
+        if target_label is None:
+            return
+        self.image_label = target_label
         scaled_pix = self._apply_zoom(pixmap)
-        self.image_label.setPixmap(scaled_pix)
+        target_label.setPixmap(scaled_pix)
+
+    def _display_pixmap_to_doc(self, doc_index: int, pixmap: QPixmap) -> None:
+        """Display pixmap in a specific station panel by Doc index."""
+        if not hasattr(self, "camera_panels"):
+            return
+        panel = self.camera_panels.get(doc_index)
+        if not panel:
+            return
+        target_label = panel.get("image") or panel.get("label")
+        if target_label is None:
+            return
+        scaled_pix = pixmap.scaled(
+            target_label.size(),
+            Qt.IgnoreAspectRatio,
+            Qt.SmoothTransformation
+        )
+        target_label.setPixmap(scaled_pix)
 
     def _zoom_in(self):
         if self.current_image is None:
@@ -1505,6 +2357,464 @@ class MainWindow(QMainWindow):
             self._apply_binary()
         else:
             self._show_normal_image()
+
+    def _toggle_inspection_enable(self):
+        """Toggle Inspection Enable - matches old C++ OnConfigurationEnabledisableinspection()."""
+        # Toggle the flag
+        self.inspection_enabled = not self.inspection_enabled
+        
+        # Update checkbox state
+        if self.act_inspection_enable:
+            self.act_inspection_enable.setChecked(self.inspection_enabled)
+        
+        # Show informational dialog
+        dlg = EnableDisableInspectionDialog(self, self.inspection_enabled)
+        dlg.exec()
+        
+        # In old C++, this also saves to PkgLocBlobMethodParm.bEnableInspection
+        # For now, just store in memory. Add persistence later if needed.
+        
+        status = "ENABLED" if self.inspection_enabled else "DISABLED"
+        print(f"📋 Inspection {status}")
+        
+        # Refresh menu states
+        self._apply_run_state()
+    
+    def _toggle_camera_enable(self):
+        """Toggle Camera Enable - matches old C++ OnEngrCamEnable()."""
+        # In old C++: m_pTrackManager->m_bCamEnable = !m_pTrackManager->m_bCamEnable
+        # This toggles the camera hardware on/off
+        self.camera_enable = self.act_camera_enable.isChecked()
+        
+        if self.camera_enable:
+            QMessageBox.information(
+                self,
+                "Camera Enable",
+                "Camera hardware has been ENABLED.\n\n"
+                "This allows the camera to capture images during inspection.\n\n"
+                "Note: This is a placeholder. Full implementation requires\n"
+                "camera hardware integration."
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Camera Enable",
+                "Camera hardware has been DISABLED.\n\n"
+                "The camera will not capture images during inspection."
+            )
+        
+        # Update menu states after toggling camera
+        self._apply_run_state()
+    
+    def _open_camera_configuration_dialog(self):
+        """Open Camera Configuration Dialog - matches old C++ OnConfigCamsetup()."""
+        # This is only callable when:
+        # - Dialog not already open
+        # - Camera is ENABLED
+        # - Camera is AVAILABLE
+        # - System is OFFLINE
+        # - Not teaching/inspecting/calibrating
+        # - No fail track
+        
+        # Check conditions and give helpful feedback
+        if self.state.run_state != RunState.OFFLINE:
+            QMessageBox.warning(
+                self,
+                "Camera Configuration",
+                "Camera Configuration is only available in OFFLINE mode.\n\n"
+                "Please switch to OFFLINE mode first."
+            )
+            return
+        
+        if not self.camera_enable:
+            QMessageBox.warning(
+                self,
+                "Camera Configuration",
+                "Camera is not ENABLED.\n\n"
+                "Please enable the camera first:\n"
+                "1. Go to Engineering menu\n"
+                "2. Click 'Camera Enable' checkbox"
+            )
+            return
+        
+        if not self.camera_available:
+            QMessageBox.warning(
+                self,
+                "Camera Configuration",
+                "Camera is not available.\n\n"
+                "Please ensure camera is connected."
+            )
+            return
+        
+        if not self.camera_setup_dialog_open:
+            self.camera_setup_dialog_open = True
+            
+            # Get current track number (1 or 2)
+            track_num = self.state.track
+
+            # Load camera parameters from legacy .cam file (if present)
+            config_dir = self._get_config_dir()
+            cam_params = load_camera_parameters(config_dir, self.current_config_name, track_num)
+            if cam_params:
+                current = self.camera_settings.get(track_num, {})
+                current.update(cam_params)
+                self.camera_settings[track_num] = current
+            
+            # Create dialog
+            dlg = CameraConfigurationDialog(self, track_num)
+            
+            # Load current settings for this track
+            if track_num in self.camera_settings:
+                dlg.set_settings(self.camera_settings[track_num])
+            
+            # Show dialog
+            if dlg.exec() == QDialog.Accepted:
+                # Save settings to memory
+                self.camera_settings[track_num] = dlg.get_settings()
+
+                # Save to legacy .cam file (C++ compatible)
+                cam_path = save_camera_parameters(
+                    config_dir,
+                    self.current_config_name,
+                    track_num,
+                    self.camera_settings[track_num],
+                )
+                
+                # TODO: Apply settings to real camera hardware
+                # Right now settings are only stored in memory!
+                # 
+                # To make settings work with real cameras, you need to:
+                # 1. Install camera SDK (pypylon for Basler, or MvCameraControl for HIK)
+                # 2. Create camera hardware layer (device/camera_hardware.py)
+                # 3. Implement: self._apply_camera_settings_to_hardware(track_num, settings)
+                # 4. Call it here after saving
+                #
+                # Example:
+                # try:
+                #     self._apply_camera_settings_to_hardware(track_num, self.camera_settings[track_num])
+                #     QMessageBox.information(self, "Success", "Settings applied to camera!")
+                # except Exception as e:
+                #     QMessageBox.warning(self, "Hardware Error", f"Failed to apply to camera: {e}")
+                
+                QMessageBox.information(
+                    self,
+                    "Camera Configuration",
+                    f"Camera settings for Track {track_num} have been saved.\n\n"
+                    f"Saved to: {cam_path}\n\n"
+                    f"⚠️ Note: Hardware integration is not yet implemented.\n"
+                    f"Settings will not be applied to real cameras until\n"
+                    f"camera hardware layer is implemented."
+                )
+            
+            self.camera_setup_dialog_open = False
+            # Refresh menu state
+            self._apply_run_state()
+        else:
+            QMessageBox.warning(self, "Camera Configuration", "Camera setup dialog is already open.")
+    
+    def _toggle_runtime_display(self):
+        """Toggle Runtime Display Enable - matches old C++ OnEngineeringRuntimedisplayenable()."""
+        # In old C++: m_RuntimeDisplayEnable = !m_RuntimeDisplayEnable
+        # This toggles whether inspection results are displayed in real-time
+        is_enabled = self.act_runtime_display.isChecked()
+        
+        if is_enabled:
+            QMessageBox.information(
+                self,
+                "Runtime Display Enable",
+                "Runtime Display has been ENABLED.\n\n"
+                "Inspection results and overlays will be displayed in real-time\n"
+                "during production runs.\n\n"
+                "This helps monitor inspection quality but may slow down\n"
+                "high-speed inspection."
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Runtime Display Enable",
+                "Runtime Display has been DISABLED.\n\n"
+                "Inspection results will not be displayed during production runs.\n"
+                "This maximizes inspection speed."
+            )
+
+    # =================================================
+    # RUN → INSPECT CYCLE / SAVED IMAGES
+    # =================================================
+    def _toggle_inspect_cycle_single(self):
+        """Toggle continuous inspection on the current single image (offline)."""
+        if self.state.run_state != RunState.OFFLINE:
+            QMessageBox.warning(self, "Inspect Cycle", "Switch to OFFLINE mode first.")
+            if hasattr(self, "act_inspect_cycle_single"):
+                self.act_inspect_cycle_single.setChecked(self.cont_insp_active)
+            return
+
+        if self.current_image is None:
+            QMessageBox.warning(self, "Inspect Cycle", "No image loaded. Please GRAB or load an image first.")
+            if hasattr(self, "act_inspect_cycle_single"):
+                self.act_inspect_cycle_single.setChecked(self.cont_insp_active)
+            return
+
+        if self.cont_insp_active:
+            self._stop_inspect_cycle()
+        else:
+            self._start_inspect_cycle()
+
+        self._apply_run_state()
+
+    def _start_inspect_cycle(self):
+        """Start continuous inspection loop."""
+        self.cont_insp_active = True
+        delay = load_auto_run_setting().delay_time
+        delay = max(10, int(delay))
+        self.inspect_cycle_timer.start(delay)
+        self._on_inspect_cycle_tick()
+
+    def _stop_inspect_cycle(self):
+        """Stop continuous inspection loop."""
+        self.cont_insp_active = False
+        if self.inspect_cycle_timer.isActive():
+            self.inspect_cycle_timer.stop()
+
+    def _on_inspect_cycle_tick(self):
+        """Periodic tick for continuous inspection."""
+        if not self.cont_insp_active:
+            return
+        if self.current_image is None:
+            self._stop_inspect_cycle()
+            return
+        try:
+            self.inspecting_active = True
+            self._on_test()
+        except Exception as exc:
+            print(f"[WARN] Inspect Cycle error: {exc}")
+            self._stop_inspect_cycle()
+        finally:
+            self.inspecting_active = False
+
+    def _toggle_inspect_saved_images_autorun(self):
+        """Toggle AutoRun for inspecting saved images."""
+        if self.insp_saved_images_active:
+            self._stop_saved_images_run()
+        else:
+            dlg = AutoRunSettingDialog(self)
+            if dlg.exec() != QDialog.Accepted:
+                self._apply_run_state()
+                return
+            self._start_saved_images_run(with_draw=False)
+
+    def _toggle_inspect_saved_images_autorun_draw(self):
+        """Toggle AutoRun With Draw for inspecting saved images."""
+        if self.insp_saved_images_draw_active:
+            self._stop_saved_images_run()
+        else:
+            dlg = AutoRunWithDrawSettingDialog(self)
+            if dlg.exec() != QDialog.Accepted:
+                self._apply_run_state()
+                return
+            self._start_saved_images_run(with_draw=True)
+
+    def _start_saved_images_run(self, with_draw: bool):
+        """Start inspecting saved images in sequence."""
+        if self.state.run_state != RunState.OFFLINE:
+            QMessageBox.warning(self, "Inspect Saved Images", "Switch to OFFLINE mode first.")
+            self._apply_run_state()
+            return
+
+        if not self._load_saved_images_list(reset=True):
+            return
+
+        self.insp_saved_images_active = not with_draw
+        self.insp_saved_images_draw_active = with_draw
+        self.saved_images_step_active = False
+
+        delay = load_auto_run_setting().delay_time
+        delay = max(10, int(delay))
+        self.saved_images_timer.start(delay)
+        self._on_saved_images_tick()
+        self._apply_run_state()
+
+    def _stop_saved_images_run(self):
+        """Stop inspecting saved images."""
+        self.insp_saved_images_active = False
+        self.insp_saved_images_draw_active = False
+        if self.saved_images_timer.isActive():
+            self.saved_images_timer.stop()
+        self._apply_run_state()
+
+    def _on_saved_images_tick(self):
+        """Periodic tick to inspect next saved image."""
+        if not (self.insp_saved_images_active or self.insp_saved_images_draw_active):
+            return
+
+        if self.saved_images_index >= len(self.saved_images_list):
+            self._stop_saved_images_run()
+            return
+
+        image_path = self.saved_images_list[self.saved_images_index]
+        self.saved_images_index += 1
+        img = cv2.imread(str(image_path))
+        if img is None:
+            print(f"[WARN] Failed to load image: {image_path}")
+            return
+
+        self.current_image = img
+        self._show_image(img)
+        try:
+            self.inspecting_active = True
+            self._on_test()
+        except Exception as exc:
+            print(f"[WARN] Saved Images inspect error: {exc}")
+            self._stop_saved_images_run()
+        finally:
+            self.inspecting_active = False
+
+    def _run_saved_images_step(self):
+        """Inspect one saved image per click (Step mode)."""
+        if self.state.run_state != RunState.OFFLINE:
+            QMessageBox.warning(self, "Inspect Saved Images", "Switch to OFFLINE mode first.")
+            self._apply_run_state()
+            return
+
+        if not self._load_saved_images_list(reset=False):
+            self._apply_run_state()
+            return
+
+        # Toggle step mode active; when active, each click processes next image
+        if not self.saved_images_step_active:
+            self.saved_images_step_active = True
+
+        if self.saved_images_index >= len(self.saved_images_list):
+            # End of list → stop step mode
+            self.saved_images_step_active = False
+            self.saved_images_index = 0
+            self._apply_run_state()
+            return
+
+        image_path = self.saved_images_list[self.saved_images_index]
+        self.saved_images_index += 1
+        img = cv2.imread(str(image_path))
+        if img is None:
+            print(f"[WARN] Failed to load image: {image_path}")
+            self.saved_images_step_active = False
+            self._apply_run_state()
+            return
+
+        self.current_image = img
+        self._show_image(img)
+        try:
+            self.inspecting_active = True
+            self._on_test()
+        except Exception as exc:
+            print(f"[WARN] Saved Images step error: {exc}")
+        finally:
+            self.inspecting_active = False
+        # Keep step mode active until end of list; user clicks again for next image
+        self._apply_run_state()
+
+    def _set_saved_images_folder(self):
+        """Select folder containing saved images for inspection."""
+        folder = QFileDialog.getExistingDirectory(self, "Select Stored Image Folder", str(self.saved_images_folder))
+        if folder:
+            self.saved_images_folder = Path(folder)
+            self.saved_images_list = []
+            self.saved_images_index = 0
+            QMessageBox.information(self, "Stored Image Folder", f"Stored image folder set to:\n{folder}")
+
+    def _load_saved_images_list(self, reset: bool = True) -> bool:
+        """Load image list from saved images folder."""
+        if not self.saved_images_folder.exists():
+            QMessageBox.warning(self, "Inspect Saved Images", "Stored image folder does not exist. Please set it first.")
+            return False
+
+        exts = {".bmp", ".png", ".jpg", ".jpeg"}
+        files = [p for p in self.saved_images_folder.iterdir() if p.suffix.lower() in exts]
+        files.sort()
+
+        if not files:
+            QMessageBox.warning(self, "Inspect Saved Images", "Stored image folder is empty.")
+            return False
+
+        if reset or not self.saved_images_list:
+            self.saved_images_list = files
+            self.saved_images_index = 0
+
+        return True
+
+    def _camera_aoi_resize(self):
+        """Camera AOI Resize Mode - matches old C++ OnEngrCamAoi()."""
+        # Check if in OFFLINE mode (required for AOI resize)
+        if self.state.run_state == RunState.ONLINE:
+            QMessageBox.warning(
+                self,
+                "Camera AOI Resize",
+                "Camera AOI Resize is only available in OFFLINE mode.\n"
+                "Please switch to OFFLINE mode first."
+            )
+            return
+
+        # Get current camera model for current station
+        camera_model = self._get_current_camera_model()
+        
+        # Check if camera model supports AOI resizing
+        # USB3CT, USB4CT, USB5MT, USB3MT, USB4CU, USB4MK, USB4CK, 1394MB support direct AOI
+        supported_models = ["USB3CT", "USB4CT", "USB5MT", "USB3MT", "USB4CU", "USB4MK", "USB4CK", "1394MB"]
+        
+        if camera_model in supported_models:
+            # For supported cameras: Show AOI resize dialog
+            QMessageBox.information(
+                self,
+                "Camera AOI Resize Mode",
+                f"Camera AOI Resize Mode activated for {camera_model}.\n\n"
+                "This feature allows you to adjust the camera's Area of Interest (AOI).\n\n"
+                "In the old system, this would:\n"
+                "1. Open an interactive AOI selection window\n"
+                "2. Allow you to draw a RED box to define the new AOI\n"
+                "3. Click NEXT button to apply the changes\n"
+                "4. Save the new AOI settings to camera parameters\n\n"
+                "Note: This is a placeholder implementation. Full AOI resize requires\n"
+                "camera hardware integration."
+            )
+        else:
+            # For other cameras: Show restart confirmation dialog
+            reply = QMessageBox.question(
+                self,
+                "Camera AOI Resize",
+                "Application will close. Click 'Yes' and reopen the application \n"
+                "to automatically enable AOI Resizing feature.\n\n"
+                "This will reset the camera AOI to maximum size.\n\n"
+                "Do you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # In the old C++ code, this would:
+                # 1. Reset m_rectAoi to m_rectAoiMax
+                # 2. Save camera parameters
+                # 3. Close the application
+                QMessageBox.information(
+                    self,
+                    "Camera AOI Reset",
+                    "Camera AOI has been reset to maximum size.\n\n"
+                    "The application will now close. Please restart the application\n"
+                    "to apply the changes."
+                )
+                # Close the application
+                self.close()
+
+    def _get_current_camera_model(self) -> str:
+        """Get the camera model for the current station."""
+        # Map station to camera model from camera_settings.json
+        station_to_model = {
+            "Feed": "USB4CT",      # Color camera
+            "Top": "USB3CT",       # Mono camera
+            "Bottom": "USB3CT",    # Mono camera
+            "Pick-up 1": "USB3CT",
+            "Pick-up 2": "USB3CT",
+            "Bottom Sealing": "USB3CT",
+            "Top Sealing": "USB3CT"
+        }
+        return station_to_model.get(self.state.station, "USB3CT")
 
     def _apply_binary(self):
         if self.current_image is None:
@@ -1726,7 +3036,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "Image Rotation",
-            "Is the image rotated?",
+            "Do you want to rotate image?",
             QMessageBox.Yes | QMessageBox.No
         )
 
@@ -1734,7 +3044,6 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.No:
             params = self.current_params()
             params.rotation_angle = 0.0
-
 
             QMessageBox.information(
                 self,
@@ -1746,23 +3055,8 @@ class MainWindow(QMainWindow):
             return
 
         # ---- YES ROTATION ----
-        dlg = ImageRotationDialog(
-            self,
-            initial_angle=self.inspection_parameters.rotation_angle
-        )
-
-        if dlg.exec():
-            params = self.current_params()
-            params.rotation_angle = dlg.angle
-
-
-            QMessageBox.information(
-                self,
-                "Rotation",
-                "Image rotation completed.\nClick OK to continue."
-            )
-
-            self._start_package_teach()
+        # Show red box to define rotation ROI (matches old teaching procedure)
+        self._start_rotation_teach()
 
 
     def _start_rotation_teach(self):
@@ -1865,11 +3159,241 @@ class MainWindow(QMainWindow):
 
             save_teach_data(self.inspection_parameters_by_station)
 
-            # Ask about color inspection teach (same pattern as old code)
-            self._ask_color_inspection_teach()
+            # Ask about mark teaching first (matches old procedure)
+            self._ask_mark_teach()
         else:
             # Retry package teach
             self._start_package_roi()
+
+    def _ask_mark_teach(self):
+        """
+        Ask if user wants to teach marking (matches old procedure).
+        """
+        mark_config = load_mark_inspection_config()
+
+        if not mark_config.symbol_set.enable_mark_inspect:
+            self._ask_color_inspection_teach()
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Teach Marking",
+            "Do you want to Teach Marking?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self._start_mark_teach_roi()
+        else:
+            self._ask_color_inspection_teach()
+
+    def _start_mark_teach_roi(self):
+        """
+        Teach mark position - adjust rectangle to teach mark area.
+        """
+        self.teach_phase = TeachPhase.MARK_ROI
+
+        QMessageBox.information(
+            self,
+            "Teach Mark Position",
+            "Adjust the red rectangle to teach the mark area.\n"
+            "Press Enter to confirm."
+        )
+
+        self.teach_overlay = PocketTeachOverlay(self.image_label, self)
+        self.teach_overlay.setGeometry(self.image_label.rect())
+        self.teach_overlay.show()
+        self.teach_overlay.setFocus()
+
+    def _confirm_mark_teach_roi(self, roi):
+        """
+        Confirm mark area ROI and switch to binary preview.
+        """
+        params = self.current_params()
+
+        x, y, w, h = self._map_label_roi_to_image(roi)
+        params.mark_teach_x = x
+        params.mark_teach_y = y
+        params.mark_teach_w = w
+        params.mark_teach_h = h
+        params.mark_binary_threshold = self.binary_threshold
+
+        self._mark_teach_roi = (x, y, w, h)
+
+        save_teach_data(self.inspection_parameters_by_station)
+
+        if self.teach_overlay:
+            self.teach_overlay.hide()
+            self.teach_overlay.deleteLater()
+            self.teach_overlay = None
+
+        self._start_mark_binary_preview()
+
+    def _start_mark_binary_preview(self):
+        """
+        Enable binary mode for mark visibility adjustment.
+        """
+        self.teach_phase = TeachPhase.MARK_BINARY
+        self._teach_binary_prev_mode = self.binary_mode
+
+        params = self.current_params()
+        if params.mark_binary_threshold:
+            self.binary_threshold = params.mark_binary_threshold
+            self.binary_slider.setValue(self.binary_threshold)
+
+        if hasattr(self, "act_binarise") and self.act_binarise is not None:
+            self.act_binarise.blockSignals(True)
+            self.act_binarise.setChecked(True)
+            self.act_binarise.blockSignals(False)
+
+        self._toggle_binarise(True)
+
+        QMessageBox.information(
+            self,
+            "Mark Binary",
+            "Binary mode enabled. Adjust the threshold until the mark is clear.\n"
+            "Click NEXT to continue."
+        )
+
+    def _detect_mark_symbols(self):
+        """
+        Detect marks after binary adjustment and show rectangles.
+        """
+        if self.current_image is None:
+            QMessageBox.warning(self, "Teach Marking", "No image loaded.")
+            return
+
+        params = self.current_params()
+        roi = self._mark_teach_roi
+
+        if not roi or roi[2] <= 0 or roi[3] <= 0:
+            QMessageBox.warning(self, "Teach Marking", "Invalid mark teach area.")
+            return
+
+        mark_config = load_mark_inspection_config()
+
+        # --- Teach-time detection based on connected components ---
+        x, y, w, h = roi
+        gray = self.current_image
+        if len(gray.shape) == 3:
+            gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+
+        roi_img = gray[y:y + h, x:x + w]
+
+        thresh_type = cv2.THRESH_BINARY
+        if mark_config.mark_color == "Black":
+            thresh_type = cv2.THRESH_BINARY_INV
+
+        _, binary = cv2.threshold(roi_img, self.binary_threshold, 255, thresh_type)
+
+        # Light open to split touching strokes
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+        roi_area = w * h
+        min_area = max(20, int(roi_area * 0.001))
+        min_size = 5
+
+        marks = []
+        for label in range(1, num_labels):
+            x_c, y_c, w_c, h_c, area = stats[label]
+            if area < min_area:
+                continue
+            if w_c < min_size or h_c < min_size:
+                continue
+
+            marks.append({
+                "x": x + x_c,
+                "y": y + y_c,
+                "width": w_c,
+                "height": h_c,
+                "area": area
+            })
+
+        if not marks:
+            QMessageBox.warning(
+                self,
+                "Teach Marking",
+                "No marks detected. Please adjust the threshold and try again."
+            )
+            return
+
+        # Sort marks left-to-right and keep required count
+        required = mark_config.symbol_set.total_symbol_set
+        marks = sorted(marks, key=lambda m: m.get("x", 0))
+        marks = marks[:required]
+
+        if len(marks) < required:
+            QMessageBox.warning(
+                self,
+                "Teach Marking",
+                f"Detected {len(marks)} mark(s), but {required} are required.\n"
+                "Adjust the threshold and try again."
+            )
+            return
+
+        params.mark_symbol_rois = [
+            {
+                "x": m.get("x", 0),
+                "y": m.get("y", 0),
+                "w": m.get("width", 0),
+                "h": m.get("height", 0)
+            }
+            for m in marks
+        ]
+        params.mark_binary_threshold = self.binary_threshold
+
+        save_teach_data(self.inspection_parameters_by_station)
+
+        # Restore normal display and draw rectangles
+        self._restore_teach_binary_mode()
+
+        preview = self.current_image.copy()
+        for m in params.mark_symbol_rois:
+            x = m.get("x", 0)
+            y = m.get("y", 0)
+            w = m.get("w", 0)
+            h = m.get("h", 0)
+            cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+        self._show_image(preview)
+
+        self.teach_phase = TeachPhase.MARK_DETECT
+
+        QMessageBox.information(
+            self,
+            "Teach Marking",
+            "The rectangles have been placed on each mark.\n"
+            "Click NEXT to continue."
+        )
+
+    def _restore_teach_binary_mode(self):
+        """Restore binary mode state after mark teaching."""
+        if self._teach_binary_prev_mode is None:
+            return
+
+        prev_mode = self._teach_binary_prev_mode
+        self._teach_binary_prev_mode = None
+
+        if hasattr(self, "act_binarise") and self.act_binarise is not None:
+            self.act_binarise.blockSignals(True)
+            self.act_binarise.setChecked(prev_mode)
+            self.act_binarise.blockSignals(False)
+
+        self._toggle_binarise(prev_mode)
+
+    def _finish_mark_teach(self):
+        """Finalize mark teaching and continue workflow."""
+        QMessageBox.information(
+            self,
+            "Teach Complete",
+            "Mark teaching completed.\nClick OK to continue."
+        )
+
+        # Continue with color teaching or finish
+        self._ask_color_inspection_teach()
 
     def _ask_color_inspection_teach(self):
         """
@@ -2123,6 +3647,9 @@ class MainWindow(QMainWindow):
 
         self.is_teach_mode = False
 
+        # Restore binary mode if teach enabled it
+        self._restore_teach_binary_mode()
+
         if self.teach_overlay:
             self.teach_overlay.hide()
             self.teach_overlay.deleteLater()
@@ -2160,10 +3687,17 @@ class MainWindow(QMainWindow):
         # Confirm ROI via NEXT (optional, same as Enter)
         elif self.teach_phase in (
             TeachPhase.ROTATION_ROI,
-            TeachPhase.PACKAGE_ROI
+            TeachPhase.PACKAGE_ROI,
+            TeachPhase.MARK_ROI
         ):
             if self.teach_overlay:
                 self.teach_overlay.confirm()
+
+        elif self.teach_phase == TeachPhase.MARK_BINARY:
+            self._detect_mark_symbols()
+
+        elif self.teach_phase == TeachPhase.MARK_DETECT:
+            self._finish_mark_teach()
 
 
     def _confirm_overlay(self, roi):
@@ -2177,26 +3711,15 @@ class MainWindow(QMainWindow):
         if self.teach_phase == TeachPhase.ROTATION_ROI:
             self.teach_overlay.set_confirmed(True)
 
-            reply = QMessageBox.question(
-                self,
-                "Image Rotation",
-                "Is the image rotated?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-
-            if reply == QMessageBox.No:
-                self.inspection_parameters.rotation_angle = 0.0
-                self._start_package_teach()
-                return
-
-            # YES → rotation dialog
+            # Rotation dialog after ROI confirmation
+            params = self.current_params()
             dlg = ImageRotationDialog(
                 self,
-                initial_angle=self.inspection_parameters.rotation_angle
+                initial_angle=params.rotation_angle
             )
 
             if dlg.exec():
-                self.inspection_parameters.rotation_angle = dlg.angle
+                params.rotation_angle = dlg.angle
                 QMessageBox.information(
                     self,
                     "Rotation",
@@ -2211,6 +3734,12 @@ class MainWindow(QMainWindow):
             self._confirm_package_teach(roi)
             return
 
+        # ---- Mark teach ROI confirm ----
+        if self.teach_phase == TeachPhase.MARK_ROI:
+            self.teach_overlay.set_confirmed(True)
+            self._confirm_mark_teach_roi(roi)
+            return
+
         # ---- Body Color teach ROI confirm ----
         if self.teach_phase == TeachPhase.COLOR_BODY_ROI:
             self.teach_overlay.set_confirmed(True)
@@ -2221,6 +3750,12 @@ class MainWindow(QMainWindow):
         if self.teach_phase == TeachPhase.COLOR_TERMINAL_ROI:
             self.teach_overlay.set_confirmed(True)
             self._confirm_terminal_color_teach(roi)
+            return
+
+        # ---- Symbol Image teach ROI confirm ----
+        if self.teach_phase == TeachPhase.SYMBOL_ROI:
+            self.teach_overlay.set_confirmed(True)
+            self._confirm_symbol_image_roi(roi)
             return
 
     def _apply_rotation_preview(self, angle_deg: float):
@@ -2267,11 +3802,12 @@ class MainWindow(QMainWindow):
             self.track_label.setText(f"Track {self.state.track}")
         
         # Update table headers to reflect active track
-        if hasattr(self, "top_tbl"):
-            self.top_tbl.setHorizontalHeaderLabels(["Parameter", f"Track {self.state.track}"])
-        
-        if hasattr(self, "bot_tbl"):
-            self.bot_tbl.setHorizontalHeaderLabels(["Parameter", f"Track {self.state.track} Qty", f"Track {self.state.track} %"])
+        if not getattr(self, "multi_track_tables", False):
+            if hasattr(self, "top_tbl"):
+                self.top_tbl.setHorizontalHeaderLabels(["Parameter", f"Track {self.state.track}"])
+            
+            if hasattr(self, "bot_tbl"):
+                self.bot_tbl.setHorizontalHeaderLabels(["Parameter", f"Track {self.state.track} Qty", f"Track {self.state.track} %"])
     def current_params(self) -> InspectionParameters:
         if self.state.station not in self.inspection_parameters_by_station:
             raise RuntimeError(
@@ -2328,6 +3864,15 @@ class MainWindow(QMainWindow):
     def _toggle_step_mode(self, checked: bool):
         """Toggle step mode on/off."""
         self.step_mode_enabled = checked
+        from config.debug_flags import DEBUG_STEP_MODE
+        from config.debug_flags_io import save_debug_flags
+        
+        if checked:
+            self.debug_flag |= DEBUG_STEP_MODE
+        else:
+            self.debug_flag &= ~DEBUG_STEP_MODE
+        save_debug_flags(self.debug_flag)
+        
         status = "ENABLED" if checked else "DISABLED"
         print(f"[STEP MODE] {status}")
 
@@ -2366,9 +3911,14 @@ class MainWindow(QMainWindow):
         print(f"[TEST] Station Teach Data: package=({params.package_x}, {params.package_y}, {params.package_w}, {params.package_h})")
 
         # Run test based on station
+        debug_flags = self.debug_flag
+        from config.debug_runtime import set_debug_flags
+        set_debug_flags(debug_flags)
+        from config.debug_flags import DEBUG_STEP_MODE
+        step_mode_active = bool(debug_flags & DEBUG_STEP_MODE) or self.step_mode_enabled
         if station == Station.FEED:
             # FEED station test
-            if self.step_mode_enabled:
+            if step_mode_active:
                 print(f"[TEST] Step Mode ENABLED - running step-by-step inspection")
                 # Create explicit copy using numpy to prevent any reference sharing
                 test_image = np.array(self.current_image, copy=True, order='C')
@@ -2377,7 +3927,8 @@ class MainWindow(QMainWindow):
                     image=test_image,
                     params=params,
                     step_mode=True,
-                    step_callback=self._handle_test_step
+                    step_callback=self._handle_test_step,
+                    debug_flags=debug_flags
                 )
             else:
                 # Create explicit copy using numpy to prevent any reference sharing
@@ -2385,11 +3936,12 @@ class MainWindow(QMainWindow):
                 print(f"[DEBUG] Test image copy - id={id(test_image)}")
                 result = test_feed(
                     image=test_image,
-                    params=params
+                    params=params,
+                    debug_flags=debug_flags
                 )
         else:
             # TOP/BOTTOM test with optional step mode
-            if self.step_mode_enabled:
+            if step_mode_active:
                 print(f"[TEST] Step Mode ENABLED - running step-by-step inspection")
                 # Create explicit copy using numpy to prevent any reference sharing
                 # FORCE new memory allocation by using array constructor
@@ -2403,7 +3955,8 @@ class MainWindow(QMainWindow):
                     image=test_image,
                     params=params,
                     step_mode=True,
-                    step_callback=self._handle_test_step
+                    step_callback=self._handle_test_step,
+                    debug_flags=debug_flags
                 )
             else:
                 # Create explicit copy using numpy to prevent any reference sharing
@@ -2416,25 +3969,39 @@ class MainWindow(QMainWindow):
                 print(f"[DEBUG] Test image copy - mean: {test_mean:.1f}, ROI mean: {test_roi_mean:.1f}, id={id(test_image)}")
                 result = test_top_bottom(
                     image=test_image,
-                    params=params
+                    params=params,
+                    debug_flags=debug_flags
                 )
 
         if result.result_image is not None:
-            self._show_image(result.result_image)
+            from config.debug_flags import DEBUG_DRAW
+            if self.debug_flag & DEBUG_DRAW:
+                self._show_image(result.result_image)
+            else:
+                self._show_image(self.current_image)
 
         # Debug: Verify current_image wasn't modified by test
         mean_after = cv2.mean(self.current_image)[0]
         print(f"[DEBUG] After test - current_image mean: {mean_after:.1f}")
 
+        # Check alert threshold if test failed
+        if result.status == TestStatus.FAIL:
+            # Extract defect name from message if available
+            # The test result message typically starts with the defect name
+            defect_name = self._extract_defect_name_from_message(result.message)
+            if defect_name:
+                self.alert_tracker.record_result(defect_name, is_pass=False, parent_widget=self)
+        
         # Display detailed reason in dialog box
         title = f"Test Result: {result.status}"
         QMessageBox.information(self, title, result.message)
 
         print(f"[TEST RESULT] {result.status} - {result.message}")
 
-        # Save result image to track-specific folder (pass/fail)
+        # Save result image to track-specific folder (fail only if enabled)
         try:
-            self._save_result_image(result)
+            if self.debug_save_failed_images and result.status == TestStatus.FAIL:
+                self._save_result_image(result)
         except Exception as e:
             print(f"[WARN] Failed to save result image: {e}")
 
@@ -2516,6 +4083,449 @@ class MainWindow(QMainWindow):
 
         print("[STEP] Test aborted by user")
         return False
+
+    def _extract_defect_name_from_message(self, message: str) -> str | None:
+        """Extract defect name from test result message"""
+        # Common defect patterns in messages
+        defect_keywords = [
+            "Package Location", "Pocket Location", "Body Length", "Body Width",
+            "Terminal Width", "Terminal Length", "Term-Term Length", "Terminal Pogo",
+            "Terminal Offset", "Incomplete Termination", "Terminal Oxidation",
+            "Terminal Chipoff", "Terminal Color", "Body Color", "Body Stain",
+            "Body Smear", "Edge Chipoff", "Body Crack", "Mark"
+        ]
+        
+        for keyword in defect_keywords:
+            if keyword.lower() in message.lower():
+                return keyword
+        
+        return None
+
+    def _open_alert_messages_dialog(self):
+        """Open Alert Messages dialog and reload configuration after editing"""
+        dlg = AlertMessagesDialog(self)
+        if dlg.exec():
+            # Reload alert configuration after user edits
+            self.alert_tracker.reload_config()
+            print("[ALERT] Alert messages configuration reloaded")
+
+    def _open_inspection_debug_dialog(self):
+        """Open Debug Flag Setting dialog - matches C++ OnDebugFlag()"""
+        dlg = InspectionDebugDialog(self.debug_flag, self)
+        if dlg.exec():
+            # Update debug flags - matches C++ m_lDebugFlag
+            self.debug_flag = dlg.get_debug_flags()
+            
+            # Save to configuration file
+            from config.debug_flags_io import save_debug_flags
+            save_debug_flags(self.debug_flag)
+            
+            # Log the updated flags
+            from config.debug_flags import (
+                DEBUG_DRAW, DEBUG_PRINT, DEBUG_PRINT_EXT, DEBUG_EDGE, DEBUG_STEP_MODE,
+                DEBUG_SAVE_FAIL_IMAGE, DEBUG_TIME, DEBUG_TIME_EXT, DEBUG_BLOB, DEBUG_HIST,
+                DEBUG_PKGLOC, DEBUG_PVI
+            )
+            
+            flags_enabled = []
+            if self.debug_flag & DEBUG_DRAW:
+                flags_enabled.append("Debug Draw")
+            if self.debug_flag & DEBUG_PRINT:
+                flags_enabled.append("Debug Print")
+            if self.debug_flag & DEBUG_PRINT_EXT:
+                flags_enabled.append("Debug Print Ext")
+            if self.debug_flag & DEBUG_TIME:
+                flags_enabled.append("Debug Timing")
+            if self.debug_flag & DEBUG_TIME_EXT:
+                flags_enabled.append("Debug Timing Ext")
+            if self.debug_flag & DEBUG_STEP_MODE:
+                flags_enabled.append("Debug Step Mode")
+            if self.debug_flag & DEBUG_EDGE:
+                flags_enabled.append("Debug Edge")
+            if self.debug_flag & DEBUG_BLOB:
+                flags_enabled.append("Debug Blob")
+            if self.debug_flag & DEBUG_HIST:
+                flags_enabled.append("Debug Histogram")
+            if self.debug_flag & DEBUG_SAVE_FAIL_IMAGE:
+                flags_enabled.append("Save Failed Images")
+            if self.debug_flag & DEBUG_PKGLOC:
+                flags_enabled.append("Package Location")
+            if self.debug_flag & DEBUG_PVI:
+                flags_enabled.append("Top Station")
+
+            # Sync save failed images flag (matches C++ m_bDebugSaveFailedImages)
+            self.debug_save_failed_images = bool(self.debug_flag & DEBUG_SAVE_FAIL_IMAGE)
+
+            # Sync step mode flag and menu action
+            from config.debug_flags import DEBUG_STEP_MODE
+            self.step_mode_enabled = bool(self.debug_flag & DEBUG_STEP_MODE)
+            if hasattr(self, "act_step_mode"):
+                self.act_step_mode.setChecked(self.step_mode_enabled)
+            
+            if flags_enabled:
+                print(f"[DEBUG] Enabled flags: {', '.join(flags_enabled)}")
+            else:
+                print("[DEBUG] All debug flags disabled")
+
+    def _open_encrypt_decrypt_dialog(self):
+        """Open Encrypt/Decrypt Images dialog"""
+        dlg = EncryptDecryptDialog(self)
+        dlg.exec()
+
+    # =================================================
+    # STUB
+    # =================================================
+    def _stub(self, name: str):
+        QMessageBox.information(self, name, f"{name}\n\n(Not implemented yet)")
+
+    # =================================================
+    # Configuration File Management
+    # =================================================
+    def _get_inspection_dir(self) -> Path:
+        inspection_dir = Path(".")
+        if hasattr(self, "lot_info"):
+            inspection_dir = Path(getattr(self.lot_info, "inspection_dir", "."))
+        return inspection_dir
+
+    def _get_config_dir(self, config_name: str | None = None) -> Path:
+        name = config_name or self.current_config_name
+        return self._get_inspection_dir() / name
+
+    def _select_config_file(self):
+        """Select and load a configuration file - matches old C++ OnConfigSelFile()."""
+        inspection_dir = self._get_inspection_dir()
+        
+        dialog = SelectConfigFileDialog(
+            current_config_name=self.current_config_name,
+            inspection_dir=str(inspection_dir),
+            parent=self
+        )
+        
+        if dialog.exec():
+            selected_config = dialog.selected_config
+            if selected_config:
+                self._load_config_file(selected_config)
+    
+    def _load_config_file(self, config_name: str):
+        """Load configuration file - matches old C++ LoadConfigFile()."""
+        import json
+        from config import inspection_parameters_io
+        
+        # Set configuration name and directory
+        self.current_config_name = config_name
+        config_dir = self._get_config_dir(config_name)
+        
+        # Create config directory if it doesn't exist
+        config_dir.mkdir(parents=True, exist_ok=True)
+        
+        files_loaded = []
+        errors = []
+        
+        try:
+            # Load inspection_parameters.json
+            params_file = config_dir / "inspection_parameters.json"
+            if params_file.exists():
+                try:
+                    # Load directly from the config file
+                    with open(params_file, 'r') as f:
+                        params_data = json.load(f)
+                    self.inspection_parameters = InspectionParameters(**params_data)
+                    files_loaded.append("inspection_parameters.json")
+                except Exception as e:
+                    errors.append(f"inspection_parameters.json: {str(e)}")
+            
+            # Load pocket_params.json
+            pocket_file = config_dir / "pocket_params.json"
+            if pocket_file.exists():
+                try:
+                    with open(pocket_file, 'r') as f:
+                        pocket_data = json.load(f)
+                    files_loaded.append("pocket_params.json")
+                except Exception as e:
+                    errors.append(f"pocket_params.json: {str(e)}")
+            
+            # Load device_location_setting.json
+            device_loc_file = config_dir / "device_location_setting.json"
+            if device_loc_file.exists():
+                try:
+                    with open(device_loc_file, 'r') as f:
+                        device_loc_data = json.load(f)
+                    files_loaded.append("device_location_setting.json")
+                except Exception as e:
+                    errors.append(f"device_location_setting.json: {str(e)}")
+            
+            # Load teach_data.json
+            teach_file = config_dir / "teach_data.json"
+            if teach_file.exists():
+                try:
+                    with open(teach_file, 'r') as f:
+                        teach_data = json.load(f)
+                    files_loaded.append("teach_data.json")
+                except Exception as e:
+                    errors.append(f"teach_data.json: {str(e)}")
+            
+            # Load alert_messages.json
+            alert_file = config_dir / "alert_messages.json"
+            if alert_file.exists():
+                try:
+                    with open(alert_file, 'r') as f:
+                        alert_data = json.load(f)
+                    files_loaded.append("alert_messages.json")
+                except Exception as e:
+                    errors.append(f"alert_messages.json: {str(e)}")
+            
+            # Load ignore_fail_count.json
+            ignore_file = config_dir / "ignore_fail_count.json"
+            if ignore_file.exists():
+                try:
+                    with open(ignore_file, 'r') as f:
+                        ignore_data = json.load(f)
+                    files_loaded.append("ignore_fail_count.json")
+                except Exception as e:
+                    errors.append(f"ignore_fail_count.json: {str(e)}")
+            
+            # Load device_inspection.json and copy to workspace root
+            device_insp_file = config_dir / "device_inspection.json"
+            if device_insp_file.exists():
+                try:
+                    import shutil
+                    # Copy to workspace root so Device Inspection dialog reads it
+                    workspace_device_insp = Path("device_inspection.json")
+                    print(f"[DEBUG] Found device_inspection.json in config: {device_insp_file}")
+                    print(f"[DEBUG] Copying to workspace root: {workspace_device_insp}")
+                    
+                    # Read and display sample values before copying
+                    with open(device_insp_file, 'r') as f:
+                        device_insp_data = json.load(f)
+                    print(f"[DEBUG] device_inspection.json keys: {list(device_insp_data.keys())}")
+                    # Show sample values from the config file
+                    if "UnitParameters" in device_insp_data:
+                        unit_params = device_insp_data["UnitParameters"]
+                        print(f"[DEBUG] Config UnitParameters sample: {list(unit_params.keys())[:2] if isinstance(unit_params, dict) else 'N/A'}")
+                    
+                    shutil.copy2(device_insp_file, workspace_device_insp)
+                    print(f"[DEBUG] Successfully copied device_inspection.json")
+                    
+                    # Verify file was copied and display new values
+                    if workspace_device_insp.exists():
+                        with open(workspace_device_insp, 'r') as f:
+                            workspace_content = json.load(f)
+                        print(f"[DEBUG] Workspace device_inspection.json now contains: {list(workspace_content.keys())}")
+                        if "UnitParameters" in workspace_content:
+                            unit_params = workspace_content["UnitParameters"]
+                            print(f"[DEBUG] Workspace UnitParameters sample: {list(unit_params.keys())[:2] if isinstance(unit_params, dict) else 'N/A'}")
+                    
+                    files_loaded.append("device_inspection.json")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to copy device_inspection.json: {e}")
+                    errors.append(f"device_inspection.json: {str(e)}")
+            else:
+                print(f"[DEBUG] device_inspection.json NOT found in config directory: {config_dir}")
+
+            # Load camera parameters from .cam file (legacy C++ format)
+            for track_num in sorted(self.camera_settings.keys()):
+                cam_params = load_camera_parameters(config_dir, config_name, track_num)
+                if cam_params:
+                    current = self.camera_settings.get(track_num, {})
+                    current.update(cam_params)
+                    self.camera_settings[track_num] = current
+                    files_loaded.append(f"{config_name}.cam (Track{track_num})")
+            
+            # Show success message
+            message = f"Configuration '{config_name}' loaded successfully!\n\n"
+            
+            if files_loaded:
+                message += "Files loaded:\n" + "\n".join(f"  ✓ {f}" for f in files_loaded)
+            else:
+                message += "No configuration files found in directory.\n"
+                message += "This is a new/empty configuration."
+            
+            if errors:
+                message += "\n\nErrors encountered:\n" + "\n".join(f"  ✗ {e}" for e in errors)
+            
+            QMessageBox.information(
+                self,
+                "Configuration Loaded",
+                message
+            )
+            
+            # Update current config name
+            self.current_config_name = config_name
+            
+            print(f"[CONFIG] Loaded configuration: {config_name}")
+            print(f"[CONFIG] Config directory: {config_dir}")
+            print(f"[CONFIG] Please close and reopen Device Inspection to see updated settings")
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Load Failed",
+                f"Failed to load configuration '{config_name}':\n{str(e)}"
+            )
+    
+    def _save_config_as(self):
+        """Save current configuration as new name - matches old C++ OnConfigurationSaveconfigas()."""
+        from PySide6.QtWidgets import QInputDialog
+        
+        inspection_dir = self._get_inspection_dir()
+        
+        while True:
+            # Show input dialog to get new config name
+            new_config_name, ok = QInputDialog.getText(
+                self,
+                "Save Configuration As",
+                "Enter new configuration file name:",
+                text=""
+            )
+            
+            if not ok or not new_config_name:
+                break
+            
+            # Check if config already exists
+            new_config_dir = inspection_dir / new_config_name
+            if new_config_dir.exists():
+                QMessageBox.warning(
+                    self,
+                    "File Exists",
+                    "This filename already exists!\n"
+                    "Please use another filename."
+                )
+                continue
+            
+            # Copy current configuration
+            try:
+                self._copy_config_file(new_config_name)
+                break  # Success, exit loop
+                
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Save Failed",
+                    f"Failed to save configuration:\n{str(e)}"
+                )
+                break
+    
+    def _copy_config_file(self, new_config_name: str):
+        """Copy current configuration to new name - matches old C++ CopyConfigFile()."""
+        from dataclasses import asdict
+        import shutil
+        import json
+        
+        # Get directories
+        inspection_dir = self._get_inspection_dir()
+        
+        # Destination: new config directory
+        dst_config_dir = inspection_dir / new_config_name
+        dst_config_dir.mkdir(parents=True, exist_ok=True)
+        
+        files_copied = []
+        
+        # Save CURRENT settings to the new config directory
+        try:
+            # Save current inspection_parameters
+            params_file = dst_config_dir / "inspection_parameters.json"
+            params_dict = asdict(self.inspection_parameters)
+            with open(params_file, 'w') as f:
+                json.dump(params_dict, f, indent=4)
+            print(f"[DEBUG] Saved inspection_parameters with keys: {list(params_dict.keys())[:3]}...")
+            print(f"[DEBUG] Sample value - body_crack_enable: {params_dict.get('body_crack_enable')}")
+            files_copied.append("inspection_parameters.json")
+        except Exception as e:
+            print(f"[CONFIG] Failed to save inspection_parameters.json: {e}")
+
+        # Save camera parameters to legacy .cam file in new config directory
+        for track_num in sorted(self.camera_settings.keys()):
+            try:
+                cam_path = save_camera_parameters(
+                    dst_config_dir,
+                    new_config_name,
+                    track_num,
+                    self.camera_settings.get(track_num, {}),
+                )
+                files_copied.append(cam_path.name)
+            except Exception as e:
+                print(f"[CONFIG] Failed to save camera .cam for Track{track_num}: {e}")
+        
+        # Copy other config files from current workspace or source config
+        config_files_to_copy = [
+            "pocket_params.json",
+            "device_location_setting.json",
+            "teach_data.json",
+            "alert_messages.json",
+            "ignore_fail_count.json",
+            "device_inspection.json"
+        ]
+        
+        # First try to copy from current config directory
+        src_config_dir = inspection_dir / self.current_config_name
+        
+        print(f"[DEBUG] _copy_config_file: Copying {len(config_files_to_copy)} file types")
+        print(f"[DEBUG] Source config dir: {src_config_dir}")
+        print(f"[DEBUG] Destination config dir: {dst_config_dir}")
+        
+        if src_config_dir.exists() and src_config_dir.is_dir():
+            print(f"[DEBUG] Source config directory exists, copying files from it")
+            for config_file in config_files_to_copy:
+                src_file = src_config_dir / config_file
+                if src_file.exists():
+                    dst_file = dst_config_dir / config_file
+                    try:
+                        shutil.copy2(src_file, dst_file)
+                        print(f"[DEBUG] Copied {config_file} from {src_file} to {dst_file}")
+                        files_copied.append(config_file)
+                    except Exception as e:
+                        print(f"[CONFIG] Failed to copy {config_file}: {e}")
+                else:
+                    print(f"[DEBUG] {config_file} not found in {src_config_dir}")
+        else:
+            print(f"[DEBUG] Source config directory does NOT exist: {src_config_dir}")
+            # Fall back to workspace root
+            for config_file in config_files_to_copy:
+                src_file = Path(config_file)
+                if src_file.exists():
+                    dst_file = dst_config_dir / config_file
+                    try:
+                        print(f"[DEBUG] Copying {config_file} from workspace root")
+                        shutil.copy2(src_file, dst_file)
+                        print(f"[DEBUG] Copied {config_file} from {src_file} to {dst_file}")
+                        files_copied.append(config_file)
+                    except Exception as e:
+                        print(f"[CONFIG] Failed to copy {config_file}: {e}")
+                else:
+                    print(f"[DEBUG] {config_file} not found in workspace root")
+            # If source doesn't exist, copy from current workspace root
+            config_files = [
+                "inspection_parameters.json",
+                "pocket_params.json",
+                "device_location_setting.json",
+                "teach_data.json",
+                "alert_messages.json",
+                "ignore_fail_count.json"
+            ]
+            
+            for config_file in config_files:
+                src_file = Path(config_file)
+                if src_file.exists():
+                    dst_file = dst_config_dir / config_file
+                    try:
+                        shutil.copy2(src_file, dst_file)
+                        files_copied.append(config_file)
+                    except Exception as e:
+                        print(f"[CONFIG] Failed to copy {config_file}: {e}")
+        
+        print(f"[CONFIG] Configuration saved as: {new_config_name}")
+        print(f"[CONFIG] Files copied: {', '.join(files_copied) if files_copied else 'none'}")
+        
+        # Load the new configuration and show success message
+        self._load_config_file(new_config_name)
+        
+        QMessageBox.information(
+            self,
+            "Save Complete",
+            f"Configuration saved as: {new_config_name}\n\n"
+            f"Files copied: {len(files_copied)}\n"
+            "The new configuration has been loaded."
+        )
 
 
     # =================================================

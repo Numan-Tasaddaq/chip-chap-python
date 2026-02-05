@@ -102,13 +102,17 @@ class CameraRegistry:
         return cameras
 
     @classmethod
-    def write_registry(cls, doc_index: int, serial_number: str) -> bool:
+    def write_registry(cls, doc_index: int, serial_number: str, model: str = "", 
+                      is_color: bool = False, cam_file: str = "") -> bool:
         """
-        Write camera serial number to Windows Registry.
+        Write camera configuration to Windows Registry.
 
         Args:
             doc_index: Doc index (1-7)
             serial_number: Camera serial number (e.g., "CAM123456")
+            model: Camera model (e.g., "USB3CT", "USB4CT")
+            is_color: True if color camera, False if mono
+            cam_file: Optional camera profile file path
 
         Returns:
             bool: True if successful, False otherwise
@@ -117,15 +121,34 @@ class CameraRegistry:
             print(f"[REGISTRY] Invalid doc_index: {doc_index}. Must be 1-7.")
             return False
 
-        key_name = f"Doc{doc_index}CamSN"
-
         try:
             with winreg.CreateKey(
                 winreg.HKEY_CURRENT_USER,
                 cls.REGISTRY_PATH
             ) as hkey:
+                # Write camera serial number
+                key_name = f"Doc{doc_index}CamSN"
                 winreg.SetValueEx(hkey, key_name, 0, winreg.REG_SZ, serial_number)
                 print(f"[REGISTRY] Set {key_name} = {serial_number}")
+                
+                # Write camera color type (0=mono, 1=color)
+                color_key = f"Doc{doc_index}Color"
+                color_value = 1 if is_color else 0
+                winreg.SetValueEx(hkey, color_key, 0, winreg.REG_DWORD, color_value)
+                print(f"[REGISTRY] Set {color_key} = {color_value}")
+                
+                # Write camera model info (e.g., USB3CT or USB4CT)
+                if model:
+                    model_key = f"Doc{doc_index}Model"
+                    winreg.SetValueEx(hkey, model_key, 0, winreg.REG_SZ, model)
+                    print(f"[REGISTRY] Set {model_key} = {model}")
+                
+                # Write camera profile file path (optional)
+                if cam_file:
+                    file_key = f"Doc{doc_index}CamFile"
+                    winreg.SetValueEx(hkey, file_key, 0, winreg.REG_SZ, cam_file)
+                    print(f"[REGISTRY] Set {file_key} = {cam_file}")
+                
                 return True
         except Exception as e:
             print(f"[REGISTRY] Error writing registry: {e}")
@@ -162,17 +185,63 @@ class CameraRegistry:
         return None
 
     @classmethod
+    def get_track1_serial(cls) -> Optional[str]:
+        """
+        Get camera serial number for Track 1.
+        Track 1 uses Doc1 (TOP) camera.
+        
+        Returns:
+            str: Camera serial number or None if not configured
+        """
+        cameras = cls.read_registry()
+        return cameras.get(1)  # Doc1 = TOP camera for Track 1
+    
+    @classmethod
+    def get_track2_serial(cls) -> Optional[str]:
+        """
+        Get camera serial number for Track 2.
+        Track 2 uses Doc2 (BOTTOM) camera.
+        
+        Returns:
+            str: Camera serial number or None if not configured
+        """
+        cameras = cls.read_registry()
+        return cameras.get(2)  # Doc2 = BOTTOM camera for Track 2
+
+    @classmethod
     def print_registry(cls) -> None:
-        """Print current registry configuration for debugging."""
+        """Print current registry configuration including model and color type."""
         cameras = cls.read_registry()
         if not cameras:
             print("[REGISTRY] No cameras configured in Windows Registry.")
             return
 
         print("[REGISTRY] Configured cameras:")
-        for doc_idx, serial in cameras.items():
+        for doc_idx in range(1, 8):
+            serial = cameras.get(doc_idx)
             station_name, location = cls.DOC_TO_STATION.get(doc_idx, ("UNKNOWN", "Unknown"))
-            print(f"  Doc{doc_idx} → {station_name:12s} ({location:20s}) SN={serial}")
+            
+            if serial:
+                # Try to read additional config from registry
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, cls.REGISTRY_PATH) as hkey:
+                        try:
+                            color_val, _ = winreg.QueryValueEx(hkey, f"Doc{doc_idx}Color")
+                            camera_type = "Color" if color_val else "Mono"
+                        except:
+                            camera_type = "Unknown"
+                        
+                        try:
+                            model, _ = winreg.QueryValueEx(hkey, f"Doc{doc_idx}Model")
+                        except:
+                            model = "Unknown"
+                except:
+                    camera_type = "Unknown"
+                    model = "Unknown"
+                
+                print(f"  Doc{doc_idx} → {station_name:12s} | SN={serial:15s} | {model:10s} | {camera_type}")
+            else:
+                print(f"  Doc{doc_idx} → {station_name:12s} | [NOT CONFIGURED]")
 
 
 if __name__ == "__main__":
