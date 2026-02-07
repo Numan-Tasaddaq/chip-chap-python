@@ -237,8 +237,8 @@ class MVSCamera:
             dll.MV_CC_EnumDevices.restype = c_int
             
             device_list = MV_CC_DEVICE_INFO_LIST()
-            # 0x00000031 = MV_GIGE_DEVICE | MV_USB_DEVICE | MV_CAMERALINK_DEVICE
-            ret = dll.MV_CC_EnumDevices(0x00000031, byref(device_list))
+            # 0x000000FF = All device types (GigE, USB, CameraLink, CoaXPress, etc.)
+            ret = dll.MV_CC_EnumDevices(0x000000FF, byref(device_list))
             
             if ret != MV_OK.SUCCESS:
                 logger.error(f"Enumerate devices failed: 0x{ret:08X}")
@@ -246,17 +246,32 @@ class MVSCamera:
             
             cameras = []
             for i in range(device_list.nDeviceNum):
-                device_info_ptr = device_list.pDeviceInfo[i]
-                device_info = device_info_ptr.contents
-                
-                # Extract serial number
-                serial = bytes(device_info.chSerialNumber).decode('utf-8', errors='ignore').strip('\x00')
-                
-                # Extract model name
-                model = bytes(device_info.chModelName).decode('utf-8', errors='ignore').strip('\x00')
-                
-                cameras.append((serial, model))
-                logger.info(f"Found camera: {model} (SN: {serial})")
+                try:
+                    device_info_ptr = device_list.pDeviceInfo[i]
+                    device_info = device_info_ptr.contents
+                    
+                    # Try to extract serial number and model name
+                    try:
+                        serial = bytes(device_info.chSerialNumber).decode('utf-8', errors='ignore').strip('\x00')
+                    except:
+                        serial = ""
+                    
+                    try:
+                        model = bytes(device_info.chModelName).decode('utf-8', errors='ignore').strip('\x00')
+                    except:
+                        model = ""
+                    
+                    # Fallback to generic names if fields are empty
+                    if not serial or serial.strip() == '':
+                        serial = f"Device_{i}"
+                    if not model or model.strip() == '':
+                        model = f"Camera_{i}"
+                    
+                    cameras.append((serial, model))
+                    logger.info(f"Found camera {i}: {model} (SN: {serial})")
+                except Exception as e:
+                    logger.warning(f"Error reading device {i}: {e}")
+                    cameras.append((f"Device_{i}", f"Camera_{i}"))
             
             return cameras
             
@@ -277,7 +292,7 @@ class MVSCamera:
         try:
             # Enumerate devices
             device_list = MV_CC_DEVICE_INFO_LIST()
-            ret = self.dll.MV_CC_EnumDevices(0x00000031, byref(device_list))
+            ret = self.dll.MV_CC_EnumDevices(0x000000FF, byref(device_list))
             
             if ret != MV_OK.SUCCESS:
                 logger.error(f"Enumerate devices failed: 0x{ret:08X}")
@@ -285,14 +300,38 @@ class MVSCamera:
             
             # Find matching device
             target_device = None
+            
             for i in range(device_list.nDeviceNum):
-                device_info_ptr = device_list.pDeviceInfo[i]
-                device_info = device_info_ptr.contents
-                serial = bytes(device_info.chSerialNumber).decode('utf-8', errors='ignore').strip('\x00')
-                
-                if serial == serial_number:
-                    target_device = device_info
-                    break
+                try:
+                    device_info_ptr = device_list.pDeviceInfo[i]
+                    device_info = device_info_ptr.contents
+                    
+                    # Try to extract serial number
+                    try:
+                        serial = bytes(device_info.chSerialNumber).decode('utf-8', errors='ignore').strip('\x00')
+                    except:
+                        serial = ""
+                    
+                    # Check if this matches, or use first device if serial is generic
+                    if serial == serial_number:
+                        target_device = device_info
+                        logger.info(f"Matched device {i} with serial {serial_number}")
+                        break
+                    elif serial_number.startswith("Device_") and i == int(serial_number.split("_")[1]):
+                        target_device = device_info
+                        logger.info(f"Matched generic device {i}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Error checking device {i}: {e}")
+            
+            # Fallback: if only one device, use it
+            if target_device is None and device_list.nDeviceNum == 1:
+                try:
+                    device_info_ptr = device_list.pDeviceInfo[0]
+                    target_device = device_info_ptr.contents
+                    logger.info(f"Using only available device (fallback)")
+                except:
+                    pass
             
             if target_device is None:
                 logger.error(f"Camera with serial {serial_number} not found")

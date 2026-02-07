@@ -1,7 +1,7 @@
 {
     "UnitParameters": {
-        "body_length_min": "155",
-        "body_length_max": "155",
+        "body_length_min": "283",
+        "body_length_max": "450",
         "body_width_min": "55",
         "body_width_max": "81",
         "terminal_width_min": "80",
