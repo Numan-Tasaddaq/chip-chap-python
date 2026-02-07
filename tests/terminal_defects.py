@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from config.debug_runtime import resolve_debug
 
 
 def check_terminal_pogo(image, roi, contrast, min_area, min_square=255,
@@ -340,6 +341,7 @@ def _inspect_chipoff_regions(image, regions, contrast, min_area, min_square,
 
 
 def _filter_pocket_edge_defects(rects, crop_offset, pocket_roi, debug=False):
+    debug = resolve_debug(debug)
     """
     Filter out defects that touch the pocket edge.
     
@@ -384,6 +386,7 @@ def _filter_pocket_edge_defects(rects, crop_offset, pocket_roi, debug=False):
 
 
 def _detect_black_defects(gray, contrast, min_area, min_square, apply_or=True, debug=False):
+    debug = resolve_debug(debug)
     """
     Common helper: binarize for black defects and collect qualifying contours.
     Returns (defects_found, largest_area, rects)

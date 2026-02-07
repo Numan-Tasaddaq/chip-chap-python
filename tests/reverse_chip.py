@@ -6,9 +6,11 @@ Based on ChipCap old application logic from CCInsp.cpp lines 31870-31960
 
 import cv2
 import numpy as np
+from config.debug_runtime import resolve_debug
 
 
 def check_reverse_chip(image, roi, teach_intensity, contrast_diff, debug=False):
+    debug = resolve_debug(debug)
     """
     Check if chip is reversed (accidentally placed upside down).
     

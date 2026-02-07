@@ -13,8 +13,8 @@
             "threshold": 20
         },
         "Body Length": {
-            "enabled": false,
-            "threshold": 20
+            "enabled": true,
+            "threshold": 20.0
         },
         "Body Width": {
             "enabled": false,

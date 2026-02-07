@@ -1,171 +1,204 @@
+"""
+Inspection Debug Flag Dialog - Python port from C++ DebugFlagDlg.cpp
+"""
+
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QGroupBox, QCheckBox,
-    QHBoxLayout, QPushButton
+    QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QCheckBox,
+    QPushButton, QTableWidget, QTableWidgetItem, QHeaderView
 )
-from config.debug_flags import DebugFlags
-from config.debug_flags_io import save_debug_flags, load_debug_flags
+from config.debug_flags import (
+    DEBUG_DRAW, DEBUG_PRINT, DEBUG_PRINT_EXT, DEBUG_EDGE,
+    DEBUG_STEP_MODE, DEBUG_SAVE_FAIL_IMAGE, DEBUG_TIME, DEBUG_TIME_EXT,
+    DEBUG_BLOB, DEBUG_HIST, DEBUG_PKGLOC, DEBUG_PVI, DebugFlagManager
+)
 
 
 class InspectionDebugDialog(QDialog):
-    def __init__(self, parent=None, flags: DebugFlags | None = None):
+    """Debug Flag Setting Dialog - matches C++ CDebugFlagDlg"""
+
+    def __init__(self, debug_flag: int = 0, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Debug Flag Setting")
-        self.resize(420, 300)
+        self.resize(720, 620)
 
-        # Model
-        self.flags = flags or load_debug_flags()
+        # Initialize debug flag manager
+        self.debug_manager = DebugFlagManager(debug_flag)
 
-        # Store checkboxes in a dict for easy access
-        self._checkboxes: dict[str, QCheckBox] = {}
+        # Create UI
+        self._create_ui()
 
-        self._build_ui()
-        self._load_from_model()
+        # Load current flags into checkboxes
+        self._load_flags()
 
-    # ------------------------------
-    # Build UI
-    # ------------------------------
-    def _build_ui(self):
-        self.setStyleSheet("""
-            QDialog {
-                background: #f7f7f7;
-                font-size: 13px;
-            }
+    def _create_ui(self):
+        """Create the dialog UI"""
+        layout = QVBoxLayout()
 
-            QLabel {
-                color: #2b2b2b;
-            }
+        # Station Modules Group
+        station_group = QGroupBox("Station Modules")
+        station_layout = QVBoxLayout()
 
-            QGroupBox {
-                border: 1px solid #cfcfcf;
-                border-radius: 6px;
-                margin-top: 14px;
-                padding-top: 10px;
-                font-weight: 600;
-                color: #333;
-            }
+        self.chk_pkg_loc = QCheckBox("Package Location")
+        self.chk_top_station = QCheckBox("Top Station")
+        self.chk_bottom_station = QCheckBox("Bottom Station")
 
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 12px;
-                padding: 0 6px;
-                background: #f7f7f7;
-            }
+        station_layout.addWidget(self.chk_pkg_loc)
+        station_layout.addWidget(self.chk_top_station)
+        station_layout.addWidget(self.chk_bottom_station)
+        station_group.setLayout(station_layout)
 
-            QCheckBox {
-                spacing: 8px;
-                padding: 2px;
-            }
+        # Debugging Options Group
+        debug_group = QGroupBox("Debugging Options")
+        debug_layout = QVBoxLayout()
 
-            QPushButton {
-                height: 28px;
-                min-width: 90px;
-                border-radius: 4px;
-                background: #e6e6e6;
-                border: 1px solid #bdbdbd;
-                font-weight: 600;
-            }
+        self.chk_debug_draw = QCheckBox("Debug Draw")
+        self.chk_debug_print = QCheckBox("Debug Print")
+        self.chk_debug_print_ext = QCheckBox("Debug Print Ext")
+        self.chk_debug_time = QCheckBox("Debug Timing")
+        self.chk_debug_time_ext = QCheckBox("Debug Timing Ext")
+        self.chk_debug_step = QCheckBox("Debug Step Mode")
+        self.chk_debug_edge = QCheckBox("Debug Edge")
+        self.chk_debug_blob = QCheckBox("Debug Blob")
+        self.chk_debug_hist = QCheckBox("Debug Histogram")
+        self.chk_save_failed = QCheckBox("Save Failed Images")
 
-            QPushButton#okBtn {
-                background-color: #0078d7;
-                color: white;
-                border: none;
-            }
+        debug_layout.addWidget(self.chk_debug_draw)
+        debug_layout.addWidget(self.chk_debug_print)
+        debug_layout.addWidget(self.chk_debug_print_ext)
+        debug_layout.addWidget(self.chk_debug_time)
+        debug_layout.addWidget(self.chk_debug_time_ext)
+        debug_layout.addWidget(self.chk_debug_step)
+        debug_layout.addWidget(self.chk_debug_edge)
+        debug_layout.addWidget(self.chk_debug_blob)
+        debug_layout.addWidget(self.chk_debug_hist)
+        debug_layout.addWidget(self.chk_save_failed)
+        debug_group.setLayout(debug_layout)
 
-            QPushButton#okBtn:hover {
-                background-color: #006ac1;
-            }
-        """)
+        # Description Table
+        table_label = QGroupBox("Description")
+        table_layout = QVBoxLayout()
 
-        main = QVBoxLayout(self)
-        main.setContentsMargins(16, 16, 16, 16)
-        main.setSpacing(14)
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Option", "Description"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
 
-        # ================= Station Modules =================
-        grp_station = QGroupBox("STATION MODULES")
-        v1 = QVBoxLayout(grp_station)
-        v1.setSpacing(8)
+        # Add descriptions
+        descriptions = [
+            ("Debug Draw", "Draw overlays on inspection images (lines, rectangles, etc.)"),
+            ("Debug Print", "Print inspection data to console"),
+            ("Debug Print Ext", "Print extra inspection data to console"),
+            ("Debug Timing", "Print timing information"),
+            ("Debug Timing Ext", "Print extended timing information"),
+            ("Debug Step Mode", "Enable step-by-step inspection with confirmation dialogs"),
+            ("Debug Edge", "Enable edge detection debugging information"),
+            ("Debug Blob", "Enable blob detection debugging information"),
+            ("Debug Histogram", "Enable histogram debugging information"),
+            ("Save Failed Images", "Automatically save images when inspection fails"),
+            ("Package Location", "Enable debugging for package location inspection"),
+            ("Top Station", "Enable debugging for top station PVI inspection"),
+            ("Bottom Station", "Enable debugging for bottom station inspection")
+        ]
 
-        for key, label in [
-            ("package_location", "Package Location"),
-            ("top_station", "Top Station"),
-            ("bottom_station", "Bottom Station"),
-        ]:
-            cb = QCheckBox(label)
-            self._checkboxes[key] = cb
-            v1.addWidget(cb)
+        self.table.setRowCount(len(descriptions))
+        for i, (option, desc) in enumerate(descriptions):
+            self.table.setItem(i, 0, QTableWidgetItem(option))
+            self.table.setItem(i, 1, QTableWidgetItem(desc))
 
-        main.addWidget(grp_station)
+        table_layout.addWidget(self.table)
+        table_label.setLayout(table_layout)
 
-        # ================= Debugging Options =================
-        grp_debug = QGroupBox("DEBUG OPTIONS")
-        v2 = QVBoxLayout(grp_debug)
-        v2.setSpacing(10)
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
 
-        row1 = QHBoxLayout()
-        row1.setSpacing(20)
-        for key, label in [
-            ("debug_draw", "Debug Draw"),
-            ("debug_step_mode", "Step Mode"),
-        ]:
-            cb = QCheckBox(label)
-            self._checkboxes[key] = cb
-            row1.addWidget(cb)
-        row1.addStretch()
-        v2.addLayout(row1)
+        self.btn_ok = QPushButton("OK")
+        self.btn_cancel = QPushButton("Cancel")
 
-        row2 = QHBoxLayout()
-        row2.setSpacing(20)
-        for key, label in [
-            ("debug_print", "Debug Print"),
-            ("debug_edge", "Debug Edge"),
-        ]:
-            cb = QCheckBox(label)
-            self._checkboxes[key] = cb
-            row2.addWidget(cb)
-        row2.addStretch()
-        v2.addLayout(row2)
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
 
-        cb = QCheckBox("Save Failed Images")
-        self._checkboxes["save_failed_images"] = cb
-        v2.addWidget(cb)
+        button_layout.addWidget(self.btn_ok)
+        button_layout.addWidget(self.btn_cancel)
 
-        main.addWidget(grp_debug)
+        # Add all to main layout
+        layout.addWidget(station_group)
+        layout.addWidget(debug_group)
+        layout.addWidget(table_label)
+        layout.addLayout(button_layout)
 
-        # ================= Buttons =================
-        btns = QHBoxLayout()
-        btns.addStretch()
+        self.setLayout(layout)
 
-        ok = QPushButton("OK")
-        ok.setObjectName("okBtn")
+    def _load_flags(self):
+        """Load current flags into checkboxes - matches C++ OnInitDialog()"""
+        # Station Modules
+        self.chk_pkg_loc.setChecked(self.debug_manager.has_flag(DEBUG_PKGLOC))
+        self.chk_top_station.setChecked(self.debug_manager.has_flag(DEBUG_PVI))
+        self.chk_bottom_station.setChecked(False)  # Not in C++ - disabled
+        self.chk_bottom_station.setEnabled(False)  # Disable since not implemented
 
-        cancel = QPushButton("Cancel")
+        # Debugging Options
+        self.chk_debug_draw.setChecked(self.debug_manager.has_flag(DEBUG_DRAW))
+        self.chk_debug_print.setChecked(self.debug_manager.has_flag(DEBUG_PRINT))
+        self.chk_debug_print_ext.setChecked(self.debug_manager.has_flag(DEBUG_PRINT_EXT))
+        self.chk_debug_time.setChecked(self.debug_manager.has_flag(DEBUG_TIME))
+        self.chk_debug_time_ext.setChecked(self.debug_manager.has_flag(DEBUG_TIME_EXT))
+        self.chk_debug_step.setChecked(self.debug_manager.has_flag(DEBUG_STEP_MODE))
+        self.chk_debug_edge.setChecked(self.debug_manager.has_flag(DEBUG_EDGE))
+        self.chk_debug_blob.setChecked(self.debug_manager.has_flag(DEBUG_BLOB))
+        self.chk_debug_hist.setChecked(self.debug_manager.has_flag(DEBUG_HIST))
+        self.chk_save_failed.setChecked(self.debug_manager.has_flag(DEBUG_SAVE_FAIL_IMAGE))
 
-        ok.clicked.connect(self._on_ok)
-        cancel.clicked.connect(self.reject)
+    def accept(self):
+        """Save flags when OK is clicked - matches C++ OnOK()"""
+        # Reset flags
+        self.debug_manager.reset()
 
-        btns.addWidget(ok)
-        btns.addWidget(cancel)
-        main.addLayout(btns)
+        # Station Modules
+        if self.chk_pkg_loc.isChecked():
+            self.debug_manager.set_flag(DEBUG_PKGLOC)
 
-    # ------------------------------
-    # Load model values into UI
-    # ------------------------------
-    def _load_from_model(self):
-        for key, cb in self._checkboxes.items():
-            cb.setChecked(getattr(self.flags, key, False))
+        if self.chk_top_station.isChecked():
+            self.debug_manager.set_flag(DEBUG_PVI)
 
-    # ------------------------------
-    # Apply UI values to model
-    # ------------------------------
-    def _apply_to_model(self):
-        for key, cb in self._checkboxes.items():
-            setattr(self.flags, key, cb.isChecked())
-        save_debug_flags(self.flags)
+        # Bottom station not implemented in C++, so we skip it
 
-    # ------------------------------
-    # OK button handler
-    # ------------------------------
-    def _on_ok(self):
-        self._apply_to_model()
-        self.accept()
+        # Debugging Options
+        if self.chk_debug_draw.isChecked():
+            self.debug_manager.set_flag(DEBUG_DRAW)
+
+        if self.chk_debug_print.isChecked():
+            self.debug_manager.set_flag(DEBUG_PRINT)
+
+        if self.chk_debug_print_ext.isChecked():
+            self.debug_manager.set_flag(DEBUG_PRINT_EXT)
+
+        if self.chk_debug_time.isChecked():
+            self.debug_manager.set_flag(DEBUG_TIME)
+
+        if self.chk_debug_time_ext.isChecked():
+            self.debug_manager.set_flag(DEBUG_TIME_EXT)
+
+        if self.chk_debug_step.isChecked():
+            self.debug_manager.set_flag(DEBUG_STEP_MODE)
+
+        if self.chk_debug_edge.isChecked():
+            self.debug_manager.set_flag(DEBUG_EDGE)
+
+        if self.chk_debug_blob.isChecked():
+            self.debug_manager.set_flag(DEBUG_BLOB)
+
+        if self.chk_debug_hist.isChecked():
+            self.debug_manager.set_flag(DEBUG_HIST)
+
+        if self.chk_save_failed.isChecked():
+            self.debug_manager.set_flag(DEBUG_SAVE_FAIL_IMAGE)
+
+        super().accept()
+
+    def get_debug_flags(self) -> int:
+        """Get the resulting debug flags"""
+        return self.debug_manager.get_flags()

@@ -9,6 +9,7 @@ Based on ChipCap old application logic from CCInsp.cpp lines 31870-31960
 
 import cv2
 import numpy as np
+from config.debug_runtime import resolve_debug
 
 
 def check_body_smear(image, roi, contrast, min_area, min_square=255, use_avg_contrast=True,
@@ -343,6 +344,7 @@ def check_body_stain(image, roi, contrast, min_area, min_square=255, use_avg_con
 
 
 def check_reverse_chip(image, roi, teach_intensity, contrast_diff, debug=False):
+    debug = resolve_debug(debug)
     """
     Check if chip is reversed (accidentally placed upside down).
     
@@ -440,6 +442,7 @@ def check_reverse_chip(image, roi, teach_intensity, contrast_diff, debug=False):
 def check_body_stand_stain(image, roi, edge_contrast, difference, 
                           offset_top=0, offset_bottom=0,
                           offset_left=0, offset_right=0, debug=False):
+    debug = resolve_debug(debug)
     """
     Check for body stand stain (thin stain line at package sealing edge).
     

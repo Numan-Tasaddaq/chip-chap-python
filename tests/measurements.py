@@ -1,8 +1,9 @@
 import cv2
+from config.debug_runtime import resolve_debug
 import numpy as np
-from sklearn.linear_model import RANSACRegressor
 
 def _binary_from_edge_contrast(gray, edge_contrast, debug=False):
+    debug = resolve_debug(debug)
     """Build a binary image using two polarities and choose the one with reasonable fill."""
     _, binary_inv = cv2.threshold(gray, int(edge_contrast), 255, cv2.THRESH_BINARY_INV)
     _, binary_norm = cv2.threshold(gray, int(edge_contrast), 255, cv2.THRESH_BINARY)
@@ -27,6 +28,7 @@ def _binary_from_edge_contrast(gray, edge_contrast, debug=False):
     return chosen
 
 def _measure_band_thickness_top_bottom(gray, edge_contrast=106, num_scans=60, debug=False):
+    debug = resolve_debug(debug)
     """
     Estimate thickness of top and bottom body bands between terminal inner edge and central body area.
     Returns (top_thickness, bottom_thickness) in pixels, or (None, None) if failed.
@@ -97,6 +99,7 @@ def _measure_band_thickness_top_bottom(gray, edge_contrast=106, num_scans=60, de
     return top_t, bot_t
 
 def measure_body_to_term_width(image, roi, edge_contrast=106, num_scans=60, debug=False):
+    debug = resolve_debug(debug)
     """
     Measure the thickness of the body bands adjacent to terminals (top and bottom).
     Returns dict: { 'top': value(px) or None, 'bottom': value(px) or None }
@@ -113,6 +116,7 @@ def measure_body_to_term_width(image, roi, edge_contrast=106, num_scans=60, debu
     return {'top': top_t, 'bottom': bot_t}
 
 def measure_term_to_body_gap(image, roi, edge_contrast=106, num_scans=60, debug=False):
+    debug = resolve_debug(debug)
     """
     Measure the minimum gap between terminal inner edge and body area (top and bottom),
     returning the worst-case (minimum) gap in pixels.
@@ -176,6 +180,7 @@ def measure_term_to_body_gap(image, roi, edge_contrast=106, num_scans=60, debug=
     return int(min(candidates))
 
 def measure_body_width(image, roi, body_contrast=75, debug=False):
+    debug = resolve_debug(debug)
     """
     Measure body width using edge scanning method similar to old system.
     Scans top and bottom regions, detects edges, fits lines, and calculates distance.
@@ -350,6 +355,7 @@ def measure_body_width(image, roi, body_contrast=75, debug=False):
 
 
 def measure_body_length(image, roi, body_contrast=75, debug=False):
+    debug = resolve_debug(debug)
     """
     Measure body length (left-to-right) using edge scanning.
     Scans left and right regions, detects edges, fits lines, and calculates distance.
@@ -592,6 +598,7 @@ def _fit_line_with_outlier_removal(points, iterations=5, initial_tolerance=15):
     return points
 
 def measure_terminal_width(image, roi, terminal_roi, edge_contrast=106, debug=False):
+    debug = resolve_debug(debug)
     """
     Measure terminal width using blob contour detection and projection onto package edges.
     Matches old ChipCap algorithm: finds leftmost/rightmost terminal edges and calculates distance.
@@ -673,6 +680,7 @@ def measure_terminal_width(image, roi, terminal_roi, edge_contrast=106, debug=Fa
 
 
 def measure_terminal_length(image, roi, terminal_roi, edge_contrast=106, num_scans=100, debug=False):
+    debug = resolve_debug(debug)
     """
     Measure terminal length using multi-scan edge detection.
     Matches old ChipCap algorithm: scans multiple lines perpendicular to terminal, 
@@ -847,6 +855,7 @@ def measure_term_to_term_length(image, roi, left_terminal_roi, right_terminal_ro
     
     # Try two binarization approaches for both terminals
     def get_best_binary(gray, edge_contrast, debug=False):
+        debug = resolve_debug(debug)
         """Choose best binary representation based on white percentage"""
         _, binary_inv = cv2.threshold(gray, edge_contrast, 255, cv2.THRESH_BINARY_INV)
         _, binary_normal = cv2.threshold(gray, edge_contrast, 255, cv2.THRESH_BINARY)
@@ -922,6 +931,7 @@ def measure_term_to_term_length(image, roi, left_terminal_roi, right_terminal_ro
 
 
 def check_body_width_difference(top_body_width, bottom_body_width, tolerance, debug=False):
+    debug = resolve_debug(debug)
     """
     Check if top and bottom body widths differ by more than tolerance.
     

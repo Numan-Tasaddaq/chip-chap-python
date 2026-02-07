@@ -1,0 +1,25 @@
+
+╔════════════════════════════════════════════════════════════════╗
+║                        LOT SUMMARY REPORT                      ║
+╚════════════════════════════════════════════════════════════════╝
+
+Lot Information:
+  Machine ID:        
+  Operator ID:       255
+  Order No:          11111111
+  Lot ID:            255
+  Lot Size:          255
+  Package Type:      Default
+
+Timing:
+  Start Time:        (recorded at open lot)
+  End Time:          31/01/2026  16:19:51
+
+Save Images:
+  Pass Images:       True
+  Fail Images:       False
+  All Images:        False
+
+Status: Lot Closed
+
+═══════════════════════════════════════════════════════════════════

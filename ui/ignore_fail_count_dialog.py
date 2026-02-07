@@ -27,25 +27,22 @@ class IgnoreFailCountDialog(QDialog):
     # ------------------------------
     def _build_ui(self):
         main = QVBoxLayout(self)
+        
+        # Add spacing at top
+        main.addSpacing(10)
 
         # Package Location checkbox
         cb = QCheckBox("Package Location")
         self._checkboxes["package_location"] = cb
         main.addWidget(cb)
 
-        # Empty Filter Contrast row
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Empty Filter Contrast"))
-        edt = QLineEdit()
-        edt.setFixedWidth(60)
-        self._lineedits["empty_filter_contrast"] = edt
-        row.addWidget(edt)
-        main.addLayout(row)
-
-        # Body Color checkbox
+        # Body Color checkbox  
         cb = QCheckBox("Body Color")
         self._checkboxes["body_color"] = cb
         main.addWidget(cb)
+        
+        # Add stretch to push everything to top
+        main.addStretch()
 
         # Buttons
         btns = QHBoxLayout()

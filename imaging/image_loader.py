@@ -43,7 +43,7 @@ class ImageLoader:
             return
 
         self.main_window.current_image = img
-        self.main_window._show_image(img)
+        self.main_window._show_image(img, station=self.main_window.state.station)
 
     def _display_image(self, frame):
         # Note: This function is deprecated - use main_window._show_image() instead

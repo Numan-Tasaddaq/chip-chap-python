@@ -40,6 +40,9 @@ from ui.select_config_file_dialog import SelectConfigFileDialog
 from ui.camera_configuration_dialog import CameraConfigurationDialog
 from imaging.grab_service import GrabService
 from device.camera_registry import CameraRegistry
+from device.io_manager import IOManager, get_io_manager
+from device.production_controller import ProductionController
+from config.station_trigger_config import StationTriggerConfigManager
 from imaging.image_loader import ImageLoader
 from inspection.alert_tracker import AlertTracker
 from config.inspection_parameters import InspectionParameters
@@ -179,6 +182,12 @@ class MainWindow(QMainWindow):
 
         self.grab_service=GrabService(self)
         self.image_loader = ImageLoader(self)
+        
+        # Hardware integration - production controller (initialized on first ONLINE transition)
+        self.io_manager = None
+        self.production_controller = None
+        self.station_configs = None
+        
         self.inspect_cycle_timer = QTimer()
         self.inspect_cycle_timer.timeout.connect(self._on_inspect_cycle_tick)
         self.saved_images_timer = QTimer()
@@ -1943,7 +1952,81 @@ class MainWindow(QMainWindow):
             self.act_online_offline.setChecked(offline)
             self.act_online_offline.blockSignals(False)
         
+        # Hardware integration: Start/stop production controller based on state
+        if online:
+            # Transitioning to ONLINE - start production controller
+            if self.production_controller is None:
+                self._init_production_controller()
+            
+            if self.production_controller is not None:
+                try:
+                    self.production_controller.start_production()
+                    print("[PROD] ✅ Production controller started (hardware-triggered mode)")
+                except Exception as e:
+                    print(f"[PROD] ⚠️ Failed to start production controller: {e}")
+                    print("[PROD] → Manual GRAB/LIVE will still work")
+        else:
+            # Transitioning to OFFLINE - stop production controller
+            if self.production_controller is not None:
+                try:
+                    self.production_controller.stop_production()
+                    print("[PROD] ⏸ Production controller stopped (manual mode)")
+                except Exception as e:
+                    print(f"[PROD] ⚠️ Failed to stop production controller: {e}")
+        
         self.setWindowTitle(f"iTrue - ChipCap Simulator [{self.state.run_state.value}]")
+    
+    def _init_production_controller(self):
+        """Initialize production controller for hardware-triggered operation."""
+        try:
+            print("[PROD] 🔧 Initializing production controller...")
+            
+            # Load station trigger configurations
+            self.station_configs = StationTriggerConfigManager.load_config()
+            print(f"[PROD] ✅ Loaded {len(self.station_configs)} station configurations")
+            
+            # Initialize I/O manager
+            self.io_manager = get_io_manager()
+            if not self.io_manager.setup():
+                print("[PROD] ⚠️ I/O manager setup failed - hardware may not be connected")
+                print("[PROD] → Production controller will not be available")
+                print("[PROD] → Manual GRAB/LIVE will still work")
+                self.io_manager = None
+                return
+            
+            print("[PROD] ✅ I/O manager initialized")
+            
+            # Create production controller
+            self.production_controller = ProductionController(self.io_manager, self.grab_service)
+            
+            # Configure all enabled stations
+            enabled_count = 0
+            for config in self.station_configs:
+                if config.enabled:
+                    self.production_controller.configure_station(
+                        doc_index=config.doc_index,
+                        position_sensor_line=config.position_sensor_line,
+                        camera_trigger_line=config.camera_trigger_line,
+                        ejector_distance=config.ejector_distance
+                    )
+                    enabled_count += 1
+                    print(f"[PROD]   ✓ Doc{config.doc_index} ({config.station_name}): sensor={config.position_sensor_line}, trigger={config.camera_trigger_line}")
+            
+            print(f"[PROD] ✅ Configured {enabled_count} stations")
+            
+            # Set inspection callback
+            self.production_controller.set_inspection_callback(self._production_inspection_callback)
+            print("[PROD] ✅ Inspection callback registered")
+            
+            print("[PROD] 🎉 Production controller ready for hardware-triggered operation")
+            
+        except Exception as e:
+            print(f"[PROD] ❌ Failed to initialize production controller: {e}")
+            import traceback
+            traceback.print_exc()
+            print("[PROD] → Manual GRAB/LIVE will still work")
+            self.production_controller = None
+            self.io_manager = None
     def _is_camera_supported(self) -> bool:
         """
         Defines whether camera/LIVE/GRAB is allowed
@@ -2290,16 +2373,19 @@ All lot counters reset and ready for next lot."""
         
         return scaled_pix
 
-    def _get_active_image_label(self) -> QLabel | None:
-        """Get the target QLabel for the current station camera panel."""
-        station_enum = self.state.station
-        station_name = station_enum.name if hasattr(station_enum, "name") else str(station_enum).upper()
+    def _get_image_label_for_station(self, station: Station) -> QLabel | None:
+        """Get the target QLabel for a specific station camera panel."""
+        station_name = station.name if hasattr(station, "name") else str(station).upper()
         doc_index = CameraRegistry.get_doc_index(station_name)
         if doc_index and hasattr(self, "camera_panels"):
             panel = self.camera_panels.get(doc_index)
             if panel:
                 return panel.get("image") or panel.get("label")
         return self.image_label
+
+    def _get_active_image_label(self) -> QLabel | None:
+        """Get the target QLabel for the current station camera panel."""
+        return self._get_image_label_for_station(self.state.station)
 
     def _display_pixmap(self, pixmap: QPixmap):
         """Display pixmap with current zoom level"""
@@ -3773,15 +3859,15 @@ All lot counters reset and ready for next lot."""
 
         # Preview only - don't save this as current_image
         self._show_image(rotated)
-    def _show_image(self, image):
+    def _show_image(self, image, station: Station | None = None):
         """Display an image (possibly with overlays) without overwriting the original."""
         self.displayed_image = image
-        
+
         # Debug: Verify current_image is not being modified
         if self.current_image is not None:
             mean_val = cv2.mean(self.current_image)[0]
             print(f"[DEBUG] current_image mean: {mean_val:.1f}, displayed_image mean: {cv2.mean(image)[0]:.1f}")
-        
+
         # IMPORTANT: Create a copy of the RGB data to prevent memory sharing with QImage
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
@@ -3789,6 +3875,16 @@ All lot counters reset and ready for next lot."""
         rgb_copy = rgb.copy()
         qimg = QImage(rgb_copy.data, w, h, ch * w, QImage.Format_RGB888).copy()
         pix = QPixmap.fromImage(qimg)
+
+        if station is not None:
+            target_label = self._get_image_label_for_station(station)
+            if target_label is None:
+                return
+            self.image_label = target_label
+            scaled_pix = self._apply_zoom(pix)
+            target_label.setPixmap(scaled_pix)
+            return
+
         self._display_pixmap(pix)
 
 
@@ -4100,6 +4196,142 @@ All lot counters reset and ready for next lot."""
                 return keyword
         
         return None
+    
+    def _production_inspection_callback(self, doc_index: int, frame: np.ndarray) -> bool:
+        """
+        Production inspection callback for hardware-triggered operation.
+        Called by ProductionController when a frame is captured.
+        
+        Args:
+            doc_index: Doc index (1-7) of the station that triggered
+            frame: Captured camera frame
+        
+        Returns:
+            True if inspection passed, False if failed
+        """
+        try:
+            # Map doc_index to station name
+            doc_to_station = {
+                1: Station.TOP,
+                2: Station.BOTTOM,
+                3: Station.FEED,
+                4: Station.PICKUP1,
+                5: Station.PICKUP2,
+                6: Station.BOTTOM_SEAL,
+                7: Station.TOP_SEAL,
+            }
+            
+            station = doc_to_station.get(doc_index)
+            if station is None:
+                print(f"[PROD] Unknown doc_index: {doc_index}")
+                return False
+            
+            # TOP and BOTTOM stations use the same teach data
+            test_station = station
+            if station == Station.BOTTOM:
+                test_station = Station.TOP
+            
+            # Get station-specific parameters
+            params = self.inspection_parameters_by_station[test_station]
+            
+            # Run inspection based on station
+            debug_flags = self.debug_flag
+            from config.debug_runtime import set_debug_flags
+            set_debug_flags(debug_flags)
+            
+            if station == Station.FEED:
+                result = test_feed(
+                    image=frame,
+                    params=params,
+                    debug_flags=debug_flags
+                )
+            else:
+                result = test_top_bottom(
+                    image=frame,
+                    params=params,
+                    debug_flags=debug_flags
+                )
+            
+            # Update UI with result image in the corresponding Doc panel
+            if result.result_image is not None and doc_index in self.camera_panels:
+                from config.debug_flags import DEBUG_DRAW
+                if self.debug_flag & DEBUG_DRAW:
+                    self._display_image_in_panel(doc_index, result.result_image)
+                else:
+                    self._display_image_in_panel(doc_index, frame)
+            
+            # Log result
+            status_symbol = "✅" if result.status == TestStatus.PASS else "❌"
+            print(f"[PROD] Doc{doc_index} ({station.value}): {status_symbol} {result.message}")
+            
+            # Save failed images if enabled
+            if self.debug_save_failed_images and result.status == TestStatus.FAIL:
+                try:
+                    self._save_production_result_image(doc_index, station, result, frame)
+                except Exception as e:
+                    print(f"[WARN] Failed to save production result image: {e}")
+            
+            # Track alerts if failed
+            if result.status == TestStatus.FAIL:
+                defect_name = self._extract_defect_name_from_message(result.message)
+                if defect_name:
+                    self.alert_tracker.record_result(defect_name, is_pass=False, parent_widget=self)
+            
+            return result.status == TestStatus.PASS
+            
+        except Exception as e:
+            print(f"[ERROR] Production inspection callback failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _display_image_in_panel(self, doc_index: int, image: np.ndarray):
+        """Display an image in the specified Doc panel."""
+        if doc_index not in self.camera_panels:
+            return
+
+        panel = self.camera_panels[doc_index]
+        image_label = panel.get("image") or panel.get("label") or panel.get("image_label")
+        if not image_label:
+            return
+        
+        # Convert to QPixmap and display
+        height, width = image.shape[:2]
+        if len(image.shape) == 3:
+            bytes_per_line = 3 * width
+            q_img = QImage(image.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+        else:
+            bytes_per_line = width
+            q_img = QImage(image.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+        
+        pixmap = QPixmap.fromImage(q_img)
+        image_label.setPixmap(pixmap.scaled(
+            image_label.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation
+        ))
+    
+    def _save_production_result_image(self, doc_index: int, station: Station, result: TestResult, frame: np.ndarray):
+        """Save production result image to track-specific folder."""
+        suffix = 'p' if result.status == TestStatus.PASS else 'f'
+        base_dir = Path("New folder")
+        base_dir.mkdir(parents=True, exist_ok=True)
+        
+        track_dir = base_dir / f"Doc{doc_index}_{station.value}_{suffix}"
+        track_dir.mkdir(parents=True, exist_ok=True)
+        
+        img = result.result_image if hasattr(result, 'result_image') and result.result_image is not None else frame
+        if img is None:
+            return
+        
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_path = track_dir / f"{ts}.png"
+        
+        ok = cv2.imwrite(str(out_path), img)
+        if ok:
+            print(f"[INFO] Saved production image: {out_path}")
+        else:
+            print(f"[WARN] cv2.imwrite failed: {out_path}")
 
     def _open_alert_messages_dialog(self):
         """Open Alert Messages dialog and reload configuration after editing"""

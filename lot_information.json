@@ -2,9 +2,9 @@
     "machine_id": "",
     "operator_id": "255",
     "order_no": "11111111",
-    "scan_no": "255",
-    "lot_id": "255",
-    "lot_size": "255",
+    "scan_no": "noid",
+    "lot_id": "",
+    "lot_size": "",
     "package_type": "Default",
     "save_images": {
         "pass": true,

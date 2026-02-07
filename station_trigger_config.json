@@ -1,0 +1,76 @@
+{
+  "version": "1.0",
+  "description": "Station trigger configuration for hardware-triggered inspection",
+  "stations": [
+    {
+      "doc_index": 1,
+      "station_name": "TOP",
+      "position_sensor_line": 0,
+      "camera_trigger_line": 0,
+      "ejector_distance": 10,
+      "use_hardware_trigger": true,
+      "trigger_pulse_ms": 10.0,
+      "enabled": true
+    },
+    {
+      "doc_index": 2,
+      "station_name": "BOTTOM",
+      "position_sensor_line": 1,
+      "camera_trigger_line": 1,
+      "ejector_distance": 4,
+      "use_hardware_trigger": true,
+      "trigger_pulse_ms": 10.0,
+      "enabled": true
+    },
+    {
+      "doc_index": 3,
+      "station_name": "FEED",
+      "position_sensor_line": 2,
+      "camera_trigger_line": 2,
+      "ejector_distance": 0,
+      "use_hardware_trigger": true,
+      "trigger_pulse_ms": 10.0,
+      "enabled": true
+    },
+    {
+      "doc_index": 4,
+      "station_name": "PICKUP1",
+      "position_sensor_line": 3,
+      "camera_trigger_line": 3,
+      "ejector_distance": 0,
+      "use_hardware_trigger": true,
+      "trigger_pulse_ms": 10.0,
+      "enabled": true
+    },
+    {
+      "doc_index": 5,
+      "station_name": "PICKUP2",
+      "position_sensor_line": 4,
+      "camera_trigger_line": 4,
+      "ejector_distance": 0,
+      "use_hardware_trigger": true,
+      "trigger_pulse_ms": 10.0,
+      "enabled": true
+    },
+    {
+      "doc_index": 6,
+      "station_name": "BOTTOM_SEAL",
+      "position_sensor_line": 5,
+      "camera_trigger_line": 5,
+      "ejector_distance": 0,
+      "use_hardware_trigger": true,
+      "trigger_pulse_ms": 10.0,
+      "enabled": true
+    },
+    {
+      "doc_index": 7,
+      "station_name": "TOP_SEAL",
+      "position_sensor_line": 6,
+      "camera_trigger_line": 6,
+      "ejector_distance": 0,
+      "use_hardware_trigger": true,
+      "trigger_pulse_ms": 10.0,
+      "enabled": true
+    }
+  ]
+}

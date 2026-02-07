@@ -18,6 +18,7 @@ Algorithm Overview:
 
 import cv2
 import numpy as np
+from config.debug_runtime import resolve_debug
 
 
 def check_body_crack(image, roi, contrast, min_length, min_elongation, broken_connection=0,
@@ -210,6 +211,7 @@ def check_body_crack(image, roi, contrast, min_length, min_elongation, broken_co
 
 
 def _detect_tb_edges(gray, threshold, mode="white", debug=False):
+    debug = resolve_debug(debug)
     """
     Detect Top-Bottom edges (vertical intensity changes).
     These help find horizontal cracks.
@@ -259,6 +261,7 @@ def _detect_tb_edges(gray, threshold, mode="white", debug=False):
 
 
 def _detect_lr_edges(gray, threshold, mode="white", debug=False):
+    debug = resolve_debug(debug)
     """
     Detect Left-Right edges (horizontal intensity changes).
     These help find vertical cracks.

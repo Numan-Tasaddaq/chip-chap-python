@@ -26,6 +26,28 @@ from tests.terminal_defects import (
     draw_terminal_corner_regions,
     draw_black_pixels_bands,
 )
+from imaging.device_location import detect_device_location, validate_device_location
+from imaging.pocket_location import (
+    detect_pocket_location, validate_pocket_location,
+    check_pocket_dimension, check_pocket_gap, track_pocket_shift,
+    PocketShiftRecord,
+    check_outer_pocket_stain,
+    check_emboss_tape_pickup,
+    check_sealing_stain,
+    check_sealing_stain2,
+    check_sealing_shift,
+    check_hole_side_shift,
+    check_sealing_distance_center,
+    check_bottom_dent_inspection,
+    check_special_black_emboss_sealing,
+)
+from imaging.pocket_shift_log import get_shift_log_manager
+from imaging.mark_inspection import detect_marks, verify_marks, validate_mark_position
+from config.mark_inspection_io import load_mark_inspection_config
+from config.debug_flags import (
+    DEBUG_DRAW, DEBUG_PRINT, DEBUG_PRINT_EXT, DEBUG_EDGE,
+    DEBUG_BLOB, DEBUG_HIST, DEBUG_TIME, DEBUG_TIME_EXT
+)
 import cv2
 
 # Load device inspection thresholds
@@ -86,7 +108,11 @@ def load_device_thresholds():
     try:
         with open(DEVICE_INSPECTION_FILE, "r") as f:
             data = json.load(f)
-        return data.get("UnitParameters", {})
+        # Merge UnitParameters into top-level for backward compatibility
+        unit = data.get("UnitParameters", {})
+        merged = dict(unit)
+        merged.update(data)
+        return merged
     except Exception as e:
         print(f"[WARN] Failed to load device_inspection.json: {e}")
         return {}
@@ -104,7 +130,15 @@ def load_pocket_params():
         print(f"[WARN] Failed to load pocket_params.json: {e}")
         return {}
 
-def test_top_bottom(image, params, step_mode=False, step_callback=None):
+def test_top_bottom(image, params, step_mode=False, step_callback=None, debug_flags=0):
+    debug_enabled = bool(debug_flags & (
+        DEBUG_PRINT | DEBUG_PRINT_EXT | DEBUG_EDGE |
+        DEBUG_BLOB | DEBUG_HIST | DEBUG_TIME | DEBUG_TIME_EXT
+    ))
+    debug_draw = bool(debug_flags & DEBUG_DRAW)
+    if not debug_enabled:
+        def print(*args, **kwargs):
+            return None
     print("\n[TEST] Top / Bottom inspection started")
     
     # Debug: Check image at function entry
@@ -123,6 +157,9 @@ def test_top_bottom(image, params, step_mode=False, step_callback=None):
     # Load device inspection thresholds and pocket parameters
     device_thresholds = load_device_thresholds()
     pocket_params = load_pocket_params()
+    
+    # Initialize pocket shift tracking
+    pocket_shift_record = None  # Will be created on first use if tracking enabled
     
     # Check if device has no terminal (body-only device)
     no_terminal = bool(device_thresholds.get("no_terminal", False))
@@ -162,7 +199,7 @@ def test_top_bottom(image, params, step_mode=False, step_callback=None):
     # Read from params.flags dictionary (shared across stations)
     inspection_checks = [
         # Package & Pocket
-        ("Package Location", params.flags.get("enable_package_location", False), "enable_package_location", None),
+        ("Package Location", params.flags.get("enable_package_location", False), "enable_package_location", "detect_package_location"),
         
         # Dimension Measurements (primary)
         ("Body Length", params.flags.get("check_body_length", False), "check_body_length", "measure_body_length"),
@@ -240,6 +277,91 @@ def test_top_bottom(image, params, step_mode=False, step_callback=None):
 
     for test_name, attr_name, measurement_func in enabled_tests:
         print(f"\n[TEST] {test_name} inspection")
+        
+        if measurement_func is None:
+            # Skip tests with no measurement function (placeholder tests)
+            messages.append(f"{test_name} OK (no action)")
+            continue
+        
+        if measurement_func == "detect_package_location":
+            # Package Location detection with Mark Inspection
+            print(f"[DEBUG] Processing Package Location detection")
+            from config.device_location_setting_io import load_device_location_setting
+            dev_loc_settings = load_device_location_setting()
+            
+            # Check if using taught position mode (fixed location, no detection)
+            use_teach_pos = dev_loc_settings.get("teach_pos", False)
+            
+            if use_teach_pos:
+                # Use taught package position without detection
+                print(f"[INFO] Using taught package position (teach_pos mode enabled)")
+                print(f"[INFO] Package location: ({params.package_x}, {params.package_y}, {params.package_w}x{params.package_h})")
+                
+                # Validate taught position
+                is_valid = validate_device_location(
+                    (params.package_x, params.package_y, params.package_w, params.package_h),
+                    image.shape,
+                    min_size=20,
+                    max_size_ratio=0.95,
+                    debug=True
+                )
+                
+                if not is_valid:
+                    print(f"[FAIL] Taught package location validation failed")
+                    overlay, reason = draw_test_result(
+                        image,
+                        ["Taught package location validation failed", 
+                         f"Location: ({params.package_x}, {params.package_y}, {params.package_w}x{params.package_h})"],
+                        "FAIL"
+                    )
+                    return TestResult(TestStatus.FAIL, "Package location validation failed", overlay)
+                
+                print(f"[PASS] Package location validated (taught position mode)")
+                messages.append(f"{test_name} OK (taught position)")
+                
+                # ========================================
+                # Mark Inspection (after device location - teach_pos mode)
+                # ========================================
+                mark_config = load_mark_inspection_config()
+                
+                # Check if mark inspection is enabled
+                if mark_config.symbol_set.enable_mark_inspect:
+                    print(f"[INFO] Mark Inspection enabled - running detection...")
+                    
+                    # Use taught package position for mark detection
+                    device_roi = (params.package_x, params.package_y, params.package_w, params.package_h)
+                    
+                    # Detect marks
+                    mark_result = detect_marks(
+                        working_image,
+                        config=mark_config,
+                        roi=device_roi,
+                        debug=True
+                    )
+                    
+                    if mark_result.detected:
+                        # Verify marks
+                        verify_passed, verify_details = verify_marks(
+                            mark_result.marks,
+                            mark_config,
+                            debug=True
+                        )
+                        
+                        if verify_passed:
+                            print(f"[PASS] Mark Inspection: {len(mark_result.marks)} marks detected")
+                            print(f"[INFO] Mark confidence: {mark_result.confidence:.1f}%, method: {mark_result.method}")
+                            messages.append(f"Mark Inspection OK ({len(mark_result.marks)} marks, {mark_result.confidence:.0f}%)")
+                        else:
+                            print(f"[WARN] Mark verification failed: {verify_details.get('message', 'unknown')}")
+                            messages.append(f"Mark Inspection WARN (verification failed)")
+                    else:
+                        print(f"[WARN] No marks detected: {mark_result.error_message}")
+                        messages.append(f"Mark Inspection WARN (no marks)")
+                else:
+                    print(f"[INFO] Mark Inspection disabled")
+            
+            continue  # Skip the measurement processing below
+        
         if measurement_func == "measure_body_width":
             # Debug: Check image integrity right before calling measurement
             x, y, w, h = params.package_x, params.package_y, params.package_w, params.package_h
@@ -293,7 +415,7 @@ def test_top_bottom(image, params, step_mode=False, step_callback=None):
                 (params.package_x, params.package_y, params.package_w, params.package_h),
                 top_terminal_roi,
                 edge_contrast=edge_contrast_value,
-                debug=True
+                debug=debug_enabled
             )
             
             # If top fails, try bottom terminal
@@ -2402,7 +2524,15 @@ def test_top_bottom(image, params, step_mode=False, step_callback=None):
 
     return TestResult(TestStatus.PASS, "OK", overlay)
 
-def test_feed(image, params, step_mode=False, step_callback=None):
+def test_feed(image, params, step_mode=False, step_callback=None, debug_flags=0):
+    debug_enabled = bool(debug_flags & (
+        DEBUG_PRINT | DEBUG_PRINT_EXT | DEBUG_EDGE |
+        DEBUG_BLOB | DEBUG_HIST | DEBUG_TIME | DEBUG_TIME_EXT
+    ))
+    debug_draw = bool(debug_flags & DEBUG_DRAW)
+    if not debug_enabled:
+        def print(*args, **kwargs):
+            return None
     """Test for FEED station - validates pocket location and all enabled inspections"""
     print("\n[TEST] Feed station inspection started")
 
@@ -2424,6 +2554,32 @@ def test_feed(image, params, step_mode=False, step_callback=None):
     
     if no_terminal:
         print("[INFO] No Terminal mode ENABLED - device has body only, skipping all terminal inspections")
+    
+    # Load pocket parameters for edge contrast value
+    pocket_params = load_pocket_params()
+    edge_contrast_value = int(pocket_params.get("edge_contrast_value", 106)) if pocket_params else 106
+    enable_post_seal = bool(params.flags.get("enable_pocket_post_seal", False) or pocket_params.get("enable_post_seal", False))
+    enable_emboss_tape = bool(pocket_params.get("enable_emboss_tape", False))
+
+    def _save_post_seal_image(reason: str) -> None:
+        if not enable_post_seal:
+            return
+        try:
+            import os
+            from datetime import datetime
+            base_dir = r"D:\PostSealed"
+            os.makedirs(base_dir, exist_ok=True)
+            safe_reason = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in reason)[:40]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"PostSeal_{timestamp}_{safe_reason}.bmp"
+            cv2.imwrite(os.path.join(base_dir, filename), image)
+        except Exception as e:
+            print(f"[WARN] PostSeal image save failed: {e}")
+
+    def _post_seal_fail(title: str, lines):
+        _save_post_seal_image(title)
+        overlay, reason = draw_test_result(image, lines, "FAIL")
+        return TestResult(TestStatus.FAIL, title, overlay)
 
     # -----------------------------------------------
     # 1. Check Package Location
@@ -2432,10 +2588,7 @@ def test_feed(image, params, step_mode=False, step_callback=None):
 
     if params.package_w <= 0 or params.package_h <= 0:
         print("[FAIL] Package not taught")
-        overlay, reason = draw_test_result(
-            image, ["Package not taught", "Please run Teach first"], "FAIL"
-        )
-        return TestResult(TestStatus.FAIL, "Package not taught", overlay)
+        return _post_seal_fail("Package not taught", ["Package not taught", "Please run Teach first"])
 
     if not params.flags.get("enable_package_location", False):
         print("[SKIP] Package inspection disabled")
@@ -2449,10 +2602,7 @@ def test_feed(image, params, step_mode=False, step_callback=None):
     if params.flags.get("enable_pocket_location", False):
         if params.pocket_w <= 0 or params.pocket_h <= 0:
             print("[FAIL] Pocket not taught")
-            overlay, reason = draw_test_result(
-                image, ["Pocket not taught", "Please run Teach first"], "FAIL"
-            )
-            return TestResult(TestStatus.FAIL, "Pocket not taught", overlay)
+            return _post_seal_fail("Pocket not taught", ["Pocket not taught", "Please run Teach first"])
 
         print(f"[OK] Pocket taught: ({params.pocket_x}, {params.pocket_y}, {params.pocket_w}, {params.pocket_h})")
     else:
@@ -2463,6 +2613,13 @@ def test_feed(image, params, step_mode=False, step_callback=None):
     # 3. Build list of enabled inspections IN ORDER
     # -----------------------------------------------
     inspection_checks = [
+        # Package Location
+        ("Package Location", params.flags.get("enable_package_location", False), "enable_package_location", "detect_package_location"),
+
+        # Pocket Location
+        ("Pocket Location", params.flags.get("enable_pocket_location", False), "enable_pocket_location", "detect_pocket_location"),
+        ("Outer Pocket Stain", bool(pocket_params.get("outer_stain_black", False) or pocket_params.get("outer_stain_white", False)), "outer_pocket_stain", None),
+        
         # Pocket
         ("Pocket Post Seal", params.flags.get("enable_pocket_post_seal", False) and not no_terminal, "enable_pocket_post_seal", None),
         
@@ -2532,6 +2689,17 @@ def test_feed(image, params, step_mode=False, step_callback=None):
                 skipped_tests.append(f"{test_name} (disabled)")
                 print(f"[SKIPPED] {test_name} - not enabled")
 
+    # If emboss tape enabled, only allow pocket-related inspections
+    if enable_emboss_tape:
+        pocket_only = []
+        for test_name, attr_name, measurement_func in enabled_tests:
+            if "Pocket" in test_name:
+                pocket_only.append((test_name, attr_name, measurement_func))
+            else:
+                skipped_tests.append(f"{test_name} (emboss tape)")
+                print(f"[SKIPPED] {test_name} - emboss tape enabled")
+        enabled_tests = pocket_only
+
     # Log skipped tests
     if skipped_tests:
         print(f"\n[INFO] Skipped tests: {', '.join(skipped_tests)}")
@@ -2551,7 +2719,327 @@ def test_feed(image, params, step_mode=False, step_callback=None):
     for test_name, attr_name, measurement_func in enabled_tests:
         print(f"\n[TEST] {test_name} inspection")
         
-        if measurement_func == "measure_body_width":
+        if measurement_func == "detect_package_location":
+            print(f"[DEBUG] Processing Package Location detection")
+            # Load device location settings
+            from config.device_location_setting_io import load_device_location_setting
+            dev_loc_settings = load_device_location_setting()
+            
+            # Check if using taught position mode (fixed location, no detection)
+            use_teach_pos = dev_loc_settings.get("teach_pos", False)
+            
+            if use_teach_pos:
+                # Use taught package position without detection
+                print(f"[INFO] Using taught package position (teach_pos mode enabled)")
+                print(f"[INFO] Package location: ({params.package_x}, {params.package_y}, {params.package_w}x{params.package_h})")
+                
+                # Validate taught position
+                is_valid = validate_device_location(
+                    (params.package_x, params.package_y, params.package_w, params.package_h),
+                    image.shape,
+                    min_size=20,
+                    max_size_ratio=0.95,
+                    debug=True
+                )
+                
+                if not is_valid:
+                    print(f"[FAIL] Taught package location validation failed")
+                    return _post_seal_fail(
+                        "Package location validation failed",
+                        ["Taught package location validation failed", 
+                         f"Location: ({params.package_x}, {params.package_y}, {params.package_w}x{params.package_h})"]
+                    )
+                
+                print(f"[PASS] Package location validated (taught position mode)")
+                messages.append(f"{test_name} OK (taught position)")
+                
+                # ========================================
+                # Mark Inspection (after device location - teach_pos mode)
+                # ========================================
+                mark_config = load_mark_inspection_config()
+                
+                # Check if mark inspection is enabled
+                if mark_config.symbol_set.enable_mark_inspect:
+                    print(f"[INFO] Mark Inspection enabled - running detection...")
+                    
+                    # Use taught package position for mark detection
+                    device_roi = (params.package_x, params.package_y, params.package_w, params.package_h)
+                    
+                    # Detect marks
+                    mark_result = detect_marks(
+                        working_image,
+                        config=mark_config,
+                        roi=device_roi,
+                        debug=True
+                    )
+                    
+                    if mark_result.detected:
+                        # Verify marks
+                        verify_passed, verify_details = verify_marks(
+                            mark_result.marks,
+                            mark_config,
+                            debug=True
+                        )
+                        
+                        if verify_passed:
+                            print(f"[PASS] Mark Inspection: {len(mark_result.marks)} marks detected")
+                            print(f"[INFO] Mark confidence: {mark_result.confidence:.1f}%, method: {mark_result.method}")
+                            messages.append(f"Mark Inspection OK ({len(mark_result.marks)} marks, {mark_result.confidence:.0f}%)")
+                        else:
+                            print(f"[WARN] Mark verification failed: {verify_details.get('message', 'unknown')}")
+                            messages.append(f"Mark Inspection WARN (verification failed)")
+                    else:
+                        print(f"[WARN] No marks detected: {mark_result.error_message}")
+                        messages.append(f"Mark Inspection WARN (no marks)")
+                else:
+                    print(f"[INFO] Mark Inspection disabled")
+                
+            else:
+                # Auto-detect package location using comprehensive detector
+                from imaging.device_location import detect_device_location
+                
+                # Detect package location with all configured parameters
+                result = detect_device_location(
+                    image,
+                    contrast_threshold=dev_loc_settings.get("contrast", 50),
+                    x_shift_tol=dev_loc_settings.get("x_pkg_shift_tol", 50),
+                    y_shift_tol=dev_loc_settings.get("y_pkg_shift_tol", 50),
+                    recheck=dev_loc_settings.get("pkg_loc_recheck", True),
+                    recheck_val=dev_loc_settings.get("pkg_loc_recheck_val", 30),
+                    use_red_detection=dev_loc_settings.get("enable_red_pkg_location", False),
+                    settings_dict=dev_loc_settings,
+                    debug=True
+                )
+                
+                # Validate location if detected
+                if result.detected:
+                    is_valid = validate_device_location(
+                        (result.x, result.y, result.width, result.height),
+                        image.shape,
+                        min_size=20,
+                        max_size_ratio=0.95,
+                        debug=True
+                    )
+                    
+                    if not is_valid:
+                        print(f"[FAIL] Package location validation failed")
+                        return _post_seal_fail(
+                            "Package location validation failed",
+                            ["Package location validation failed", 
+                             f"Location: ({result.x}, {result.y}, {result.width}x{result.height})"]
+                        )
+                    
+                    print(f"[PASS] Package location detected: ({result.x}, {result.y}, {result.width}x{result.height})")
+                    print(f"[INFO] Method: {result.method}, Confidence: {result.confidence:.1f}%, Contrast: {result.contrast:.1f}")
+                    messages.append(f"{test_name} OK (method={result.method}, confidence={result.confidence:.0f}%)")
+                    
+                    # ========================================
+                    # Mark Inspection (after device location)
+                    # ========================================
+                    # Load mark inspection configuration
+                    mark_config = load_mark_inspection_config()
+                    
+                    # Check if mark inspection is enabled (matching old C++ logic)
+                    if mark_config.symbol_set.enable_mark_inspect:
+                        print(f"[INFO] Mark Inspection enabled - running detection...")
+                        
+                        # Get device location for mark detection
+                        device_roi = (result.x, result.y, result.width, result.height)
+                        
+                        # Detect marks using configured method
+                        mark_result = detect_marks(
+                            working_image,
+                            config=mark_config,
+                            roi=device_roi,
+                            debug=True
+                        )
+                        
+                        if mark_result.detected:
+                            # Verify marks meet symbol requirements
+                            verify_passed, verify_details = verify_marks(
+                                mark_result.marks,
+                                mark_config,
+                                debug=True
+                            )
+                            
+                            if verify_passed:
+                                print(f"[PASS] Mark Inspection: {len(mark_result.marks)} marks detected")
+                                print(f"[INFO] Mark confidence: {mark_result.confidence:.1f}%, method: {mark_result.method}")
+                                messages.append(f"Mark Inspection OK ({len(mark_result.marks)} marks, {mark_result.confidence:.0f}%)")
+                                
+                                # Optional: Validate mark position if expected position configured
+                                # Note: expected_mark_position not in current config structure
+                                # This can be added if needed in future
+                            else:
+                                # Mark verification failed
+                                print(f"[FAIL] Mark Inspection verification failed: {verify_details.get('message', 'unknown')}")
+                                # Check if mark inspection is required (fail test) or just warning
+                                # For now, treat as warning and continue
+                                print(f"[WARN] Mark verification failed - continuing")
+                                messages.append(f"Mark Inspection WARN (verification failed)")
+                        else:
+                            # Mark detection returned False
+                            print(f"[FAIL] Mark Inspection: {mark_result.error_message}")
+                            # Treat as warning for now
+                            print(f"[WARN] No marks detected - continuing")
+                            messages.append(f"Mark Inspection WARN (no marks)")
+                    else:
+                        print(f"[INFO] Mark Inspection disabled")
+                    
+                else:
+                    print(f"[FAIL] {result.message}")
+                    return _post_seal_fail(
+                        f"{test_name} detection failed",
+                        ["Package location detection failed", result.message]
+                    )
+            
+            continue  # Skip the measurement processing below
+
+        if measurement_func == "detect_pocket_location":
+            if not params.flags.get("enable_pocket_location", False):
+                messages.append(f"{test_name} SKIP (disabled)")
+                continue
+
+            teach_rect = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            result = detect_pocket_location(
+                image,
+                teach_rect=teach_rect,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not result.detected:
+                print(f"[FAIL] Pocket location detection failed: {result.message}")
+                return _post_seal_fail(
+                    "Pocket location detection failed",
+                    ["Pocket location detection failed", result.message]
+                )
+
+            is_valid = validate_pocket_location(
+                (result.x, result.y, result.width, result.height),
+                image.shape,
+                min_size=20,
+                max_size_ratio=0.95,
+                debug=True
+            )
+
+            if not is_valid:
+                print("[FAIL] Pocket location validation failed")
+                return _post_seal_fail(
+                    "Pocket location validation failed",
+                    ["Pocket location validation failed",
+                     f"Location: ({result.x}, {result.y}, {result.width}x{result.height})"]
+                )
+
+            # Update pocket location with detected values
+            params.pocket_x = result.x
+            params.pocket_y = result.y
+            params.pocket_w = result.width
+            params.pocket_h = result.height
+
+            # Log detailed detection info with new fields
+            detail_msg = f"method={result.method}, confidence={result.confidence:.0f}%"
+            if result.angle > 0:
+                detail_msg += f", angle={result.angle:.2f}°, mode={result.parallel_mode}"
+            
+            print(f"[PASS] Pocket location detected: ({result.x}, {result.y}, {result.width}x{result.height})")
+            print(f"[INFO] {detail_msg}")
+            messages.append(f"{test_name} OK ({detail_msg})")
+            
+            # ========================================
+            # Check Pocket Dimension
+            # ========================================
+            dim_enabled = pocket_params.get("pocket_dim_length_enable") or pocket_params.get("pocket_dim_width_enable")
+            if dim_enabled:
+                dim_valid, dim_details = check_pocket_dimension(
+                    (result.x, result.y, result.width, result.height),
+                    pocket_params=pocket_params,
+                    debug=True
+                )
+                
+                if not dim_valid:
+                    print("[FAIL] Pocket dimension inspection failed")
+                    for msg in dim_details["messages"]:
+                        print(f"  [FAIL] {msg}")
+                    return _post_seal_fail(
+                        "Pocket dimension inspection failed",
+                        ["Pocket dimension inspection failed"] + dim_details["messages"]
+                    )
+                else:
+                    for msg in dim_details["messages"]:
+                        print(f"  [PASS] {msg}")
+                        messages.append(msg)
+            
+            # ========================================
+            # Check Pocket Gap
+            # ========================================
+            gap_enabled = pocket_params.get("pocket_gap_enable")
+            if gap_enabled:
+                # Use device location if available, otherwise use pocket
+                device_loc = (params.device_x, params.device_y, params.device_w, params.device_h) \
+                    if hasattr(params, 'device_x') and params.device_x > 0 else \
+                    (result.x + 10, result.y + 10, result.width - 20, result.height - 20)
+                
+                gap_valid, gap_details = check_pocket_gap(
+                    device_loc,
+                    (result.x, result.y, result.width, result.height),
+                    pocket_params=pocket_params,
+                    debug=True
+                )
+                
+                if not gap_valid:
+                    print("[FAIL] Pocket gap inspection failed")
+                    for msg in gap_details["messages"]:
+                        print(f"  [FAIL] {msg}")
+                    return _post_seal_fail(
+                        "Pocket gap inspection failed",
+                        ["Pocket gap inspection failed"] + gap_details["messages"]
+                    )
+                else:
+                    for msg in gap_details["messages"]:
+                        print(f"  [PASS] {msg}")
+                        messages.append(msg)
+            
+            # ========================================
+            # Track Pocket Shift
+            # ========================================
+            shift_enabled = pocket_params.get("pocket_shift_enable")
+            if shift_enabled:
+                pocket_shift_valid, pocket_shift_record, shift_details = track_pocket_shift(
+                    result.x,
+                    result.y,
+                    params.pocket_x,  # taught position
+                    params.pocket_y,
+                    pocket_params=pocket_params,
+                    shift_record=pocket_shift_record,
+                    debug=True
+                )
+                
+                # Log to shift log file
+                shift_log = get_shift_log_manager()
+                if shift_log.get_current_session() is not None:
+                    shift_log.log_measurement(
+                        shift_x=shift_details["current_shift"][0],
+                        shift_y=shift_details["current_shift"][1],
+                        avg_x=shift_details["avg_shift"][0],
+                        avg_y=shift_details["avg_shift"][1],
+                        tolerance_x=shift_details["tolerance_x"],
+                        tolerance_y=shift_details["tolerance_y"],
+                        valid=pocket_shift_valid
+                    )
+                
+                for msg in shift_details["messages"]:
+                    print(f"  [INFO] {msg}")
+                    messages.append(msg)
+                
+                if not pocket_shift_valid:
+                    # Alert but don't fail
+                    for alert in shift_details["alerts"]:
+                        print(f"  [ALERT] {alert}")
+            
+            continue
+        
+        elif measurement_func == "measure_body_width":
             value = measure_body_width(
                 working_image,
                 (params.package_x, params.package_y, params.package_w, params.package_h),
@@ -3649,80 +4137,281 @@ def test_feed(image, params, step_mode=False, step_callback=None):
                 return TestResult(TestStatus.FAIL, f"{test_name} NG", overlay)
             
             messages.append(f"{test_name} OK (intensity={measured_intensity})")
-        elif attr_name == "enable_sealing_stain":
-            # Body Stand Stain detection - check for thin stain line at package sealing edge
+        elif attr_name == "outer_pocket_stain":
             print(f"[INFO] Checking {test_name}...")
-            
-            # Get parameters from device_inspection.json BodyStainTab
-            body_stain_tab = device_thresholds.get("BodyStainTab", {})
-            
-            edge_contrast = int(body_stain_tab.get("bs_stand_edge_contrast", 255))
-            difference = int(body_stain_tab.get("bs_stand_difference", 255))
-            offset_top = int(body_stain_tab.get("bs_stand_off_top", 5))
-            offset_bottom = int(body_stain_tab.get("bs_stand_off_bottom", 5))
-            offset_left = int(body_stain_tab.get("bs_stand_off_left", 5))
-            offset_right = int(body_stain_tab.get("bs_stand_off_right", 5))
-            
-            # Check if parameters are configured (255 means not configured)
-            if edge_contrast == 255 or difference == 255:
-                print(f"[SKIP] {test_name} not configured (edge_contrast={edge_contrast}, difference={difference})")
-                messages.append(f"{test_name} SKIPPED (not configured)")
-                continue
-            
-            # Run body stand stain check
-            top_intensity, bottom_intensity, is_pass = check_body_stand_stain(
-                working_image,
-                (params.package_x, params.package_y, params.package_w, params.package_h),
-                edge_contrast=edge_contrast,
-                difference=difference,
-                offset_top=offset_top,
-                offset_bottom=offset_bottom,
-                offset_left=offset_left,
-                offset_right=offset_right,
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            stain_valid, stain_details = check_outer_pocket_stain(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
                 debug=True
             )
-            
-            intensity_diff = abs(top_intensity - bottom_intensity)
-            print(f"[INFO] {test_name}: top={top_intensity}, bottom={bottom_intensity}, diff={intensity_diff}, pass={is_pass}")
-            
-            # ===== STEP MODE: Show dialog for FAILED steps =====
-            if step_mode and step_callback and not is_pass:
-                step_result = {
-                    "step_name": test_name,
-                    "status": "FAIL",
-                    "measured": f"Top={top_intensity}, Bottom={bottom_intensity}, Diff={intensity_diff}",
-                    "expected": f"Difference <= {difference}",
-                    "suggested_min": None,
-                    "suggested_max": int(intensity_diff * 1.2),
-                    "debug_info": f"Top Intensity: {top_intensity}\nBottom Intensity: {bottom_intensity}\nDifference: {intensity_diff}\nThreshold: {difference}\n\nSuggested new threshold: {int(intensity_diff * 1.2)}"
-                }
-                should_continue = step_callback(step_result)
-                if not should_continue:
-                    print(f"[STEP] Test aborted by user at {test_name}")
-                    overlay, reason = draw_test_result(
-                        image,
-                        [f"{test_name}: Test paused for parameter adjustment"],
-                        "PAUSE"
-                    )
-                    return TestResult(TestStatus.FAIL, "Test paused by user", overlay)
-            
-            if not is_pass:
-                print(f"[FAIL] {test_name} intensity difference exceeds threshold")
-                overlay, reason = draw_test_result(
-                    image,
-                    [f"{test_name}: Top={top_intensity}, Bottom={bottom_intensity}, Diff={intensity_diff} (Max {difference})"],
-                    "FAIL"
+
+            if not stain_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in stain_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + stain_details.get("messages", [])
                 )
-                return TestResult(TestStatus.FAIL, f"{test_name} NG", overlay)
-            
-            messages.append(f"{test_name} OK (Top={top_intensity}, Bottom={bottom_intensity})")
-        elif attr_name == "enable_sealing_stain2":
-            # Sealing Stain 2 - for future use or additional stain checking
+
+            for msg in stain_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+
+        elif attr_name == "enable_emboss_tape_pickup":
             print(f"[INFO] Checking {test_name}...")
-            messages.append(f"{test_name} OK (not yet implemented)")
-        else:
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            pkg_loc = (params.package_x, params.package_y, params.package_w, params.package_h)
+
+            emboss_valid, emboss_details = check_emboss_tape_pickup(
+                image,
+                pocket_loc,
+                pkg_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not emboss_valid:
+                print(f"[FAIL] {test_name} failed")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + emboss_details.get("messages", [])
+                )
+
+            for msg in emboss_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+
+        elif attr_name == "enable_sealing_stain":
+            print(f"[INFO] Checking {test_name}...")
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            stain_valid, stain_details = check_sealing_stain(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not stain_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in stain_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + stain_details.get("messages", [])
+                )
+
+            for msg in stain_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+
+        elif attr_name == "enable_sealing_stain2":
+            print(f"[INFO] Checking {test_name}...")
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            stain_valid, stain_details = check_sealing_stain2(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not stain_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in stain_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + stain_details.get("messages", [])
+                )
+
+            for msg in stain_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+        
+        elif attr_name == "enable_sealing_shift":
+            print(f"[INFO] Checking {test_name}...")
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            shift_valid, shift_details = check_sealing_shift(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not shift_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in shift_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + shift_details.get("messages", [])
+                )
+
+            for msg in shift_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+
             # For non-measurement tests, just mark as OK
             messages.append(f"{test_name} OK")
+        
+        elif attr_name == "hole_side_shift":
+            print(f"[INFO] Checking {test_name}...")
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            hole_valid, hole_details = check_hole_side_shift(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not hole_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in hole_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + hole_details.get("messages", [])
+                )
+
+            for msg in hole_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+        
+        elif attr_name == "sealing_distance_center":
+            print(f"[INFO] Checking {test_name}...")
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            dist_valid, dist_details = check_sealing_distance_center(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not dist_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in dist_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + dist_details.get("messages", [])
+                )
+
+            for msg in dist_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+        
+        elif attr_name == "bottom_dent":
+            print(f"[INFO] Checking {test_name}...")
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            dent_valid, dent_details = check_bottom_dent_inspection(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not dent_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in dent_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + dent_details.get("messages", [])
+                )
+
+            for msg in dent_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
+        
+        elif attr_name == "special_black_emboss_sealing":
+            print(f"[INFO] Checking {test_name}...")
+
+            pocket_loc = (params.pocket_x, params.pocket_y, params.pocket_w, params.pocket_h)
+            if pocket_loc[2] <= 0 or pocket_loc[3] <= 0:
+                print(f"[FAIL] {test_name} - pocket not available")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    ["Pocket location not available"]
+                )
+
+            emboss_valid, emboss_details = check_special_black_emboss_sealing(
+                image,
+                pocket_loc,
+                pocket_params=pocket_params,
+                debug=True
+            )
+
+            if not emboss_valid:
+                print(f"[FAIL] {test_name} failed")
+                for msg in emboss_details.get("messages", []):
+                    print(f"  [FAIL] {msg}")
+                return _post_seal_fail(
+                    f"{test_name} failed",
+                    [f"{test_name} failed"] + emboss_details.get("messages", [])
+                )
+
+            for msg in emboss_details.get("messages", []):
+                print(f"  [PASS] {msg}")
+                messages.append(msg)
 
     # -----------------------------------------------
     # 5. ALL ENABLED TESTS PASSED

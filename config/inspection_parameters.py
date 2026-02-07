@@ -161,3 +161,11 @@ class InspectionParameters:
     pocket_y: int = 0
     pocket_w: int = 0
     pocket_h: int = 0
+
+    # Mark Teach ROI (station-specific)
+    mark_teach_x: int = 0
+    mark_teach_y: int = 0
+    mark_teach_w: int = 0
+    mark_teach_h: int = 0
+    mark_binary_threshold: int = 75
+    mark_symbol_rois: list[dict] = field(default_factory=list)
